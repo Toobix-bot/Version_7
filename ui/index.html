@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+	<meta charset="UTF-8" />
+	<title>Life-Agent Dashboard</title>
+	<meta name="viewport" content="width=device-width,initial-scale=1" />
+	<style>
+		body{font-family:system-ui,Arial,sans-serif;margin:0;background:#0f1115;color:#eee;}
+		header{padding:12px 20px;background:#1b1f27;display:flex;align-items:center;gap:16px;}
+		h1{font-size:18px;margin:0;}
+		main{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px;padding:14px;}
+		section{background:#1d222b;border:1px solid #2b313c;border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:8px;}
+		section h2{font-size:15px;margin:0 0 4px;font-weight:600;color:#9bd2ff;}
+		button{cursor:pointer;background:#2563eb;color:#fff;border:0;border-radius:4px;padding:6px 10px;font-size:13px;display:inline-flex;align-items:center;gap:6px;}
+		button.secondary{background:#374151;}
+		button:disabled{opacity:.4;cursor:not-allowed;}
+		input,textarea{width:100%;background:#11161c;color:#eee;border:1px solid #2e3a45;border-radius:4px;padding:6px;font-family:inherit;font-size:13px;}
+		textarea{min-height:90px;resize:vertical;}
+		code,pre{background:#11161c;color:#d1e7ff;font-size:12px;line-height:1.4;border:1px solid #2b313c;border-radius:4px;padding:8px;white-space:pre-wrap;word-break:break-word;max-height:260px;overflow:auto;margin:0;}
+		.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;}
+		.pill{background:#243244;padding:2px 8px;border-radius:999px;font-size:11px;color:#9fbcd9;border:1px solid #324556;}
+		footer{padding:10px 16px;font-size:12px;color:#7b8793;text-align:center;border-top:1px solid #2b313c;margin-top:8px;}
+		a{color:#70b8ff;text-decoration:none;}a:hover{text-decoration:underline;}
+		.status-ok{color:#4ade80}.status-warn{color:#fbbf24}.status-err{color:#f87171}
+		.flex{display:flex;gap:6px;align-items:center;}
+		.grow{flex:1 1 auto;}
+		.mono{font-family:ui-monospace,monospace;}
+	</style>
+</head>
+<body>
+	<header>
+		<h1>Life-Agent Dashboard</h1>
+		<div class="row" style="margin-left:auto;">
+			<input id="apiKey" placeholder="API Key" value="test" style="width:160px;" />
+			<button id="btnMeta">Meta</button>
+			<button id="btnLLM">LLM Status</button>
+			<button id="btnMetrics" class="secondary">Metrics</button>
+			<button id="btnEvents" class="secondary">Events</button>
+		</div>
+	</header>
+	<main>
+		<section>
+			<h2>Meta & LLM</h2>
+			<div class="row">
+				<span class="pill" id="metaVersion">ver...</span>
+				<span class="pill" id="metaUptime">uptime...</span>
+				<span class="pill" id="llmConfig">llm...</span>
+			</div>
+			<pre id="metaOut">Meta Output...</pre>
+			<pre id="llmOut">LLM Output...</pre>
+		</section>
+		<section>
+			<h2>Plan Demo</h2>
+			<input id="planIntent" placeholder="Intent" value="demo" />
+			<textarea id="planContext" placeholder="Context">kurzer test</textarea>
+			<input id="planTargets" placeholder="target_paths (komma)" value="api/app.py" />
+			<button id="btnPlan">/plan ausführen</button>
+			<pre id="planOut">Plan Output...</pre>
+		</section>
+		<section>
+			<h2>LLM Chat</h2>
+			<textarea id="chatPrompt" placeholder="Prompt">Sag kurz Hallo.</textarea>
+			<div class="row">
+				<button id="btnChat">/llm/chat</button>
+				<span id="chatInfo" class="pill">not configured</span>
+			</div>
+			<pre id="chatOut">Chat Output...</pre>
+		</section>
+		<section>
+			<h2>Events & Metrics</h2>
+			<div class="row">
+				<span id="eventsState" class="pill">events: idle</span>
+				<span id="metricsState" class="pill">metrics: idle</span>
+			</div>
+			<pre id="eventsOut">Events...</pre>
+			<pre id="metricsOut">Metrics...</pre>
+		</section>
+	</main>
+	<footer>
+		&copy; Life-Agent Dev • <a href="/docs" target="_blank">OpenAPI Docs</a>
+	</footer>
+
+	<script>
+		const $ = sel => document.querySelector(sel);
+		const api = (path, opts={}) => {
+			const key = $('#apiKey').value.trim();
+			const headers = Object.assign({'X-API-Key': key}, opts.headers||{});
+			return fetch(path, {...opts, headers}).then(r => r.json().catch(()=>({error:'non-json', status:r.status})));
+		};
+		function fmt(obj){try{return JSON.stringify(obj,null,2);}catch{return String(obj)}}
+		function setText(id,content){const el=$(id); if(el) el.textContent=content;}
+
+		async function loadMeta(){
+			const meta = await api('/meta');
+			setText('#metaOut', fmt(meta));
+			if(meta.meta){
+				$('#metaVersion').textContent = 'v ' + (meta.meta.version||'?');
+				$('#metaUptime').textContent = 'up ' + ((meta.uptime||0).toFixed? meta.uptime.toFixed(1): meta.uptime);
+			}
+		}
+		async function loadLLM(){
+			const s = await api('/llm/status');
+			setText('#llmOut', fmt(s));
+			$('#llmConfig').textContent = s.configured? 'LLM ON':'LLM OFF';
+			$('#chatInfo').textContent = s.configured? 'configured':'not configured';
+		}
+		async function runPlan(){
+			const body = {
+				intent: $('#planIntent').value.trim(),
+				context: $('#planContext').value,
+				target_paths: $('#planTargets').value.split(',').map(s=>s.trim()).filter(Boolean)
+			};
+			const r = await api('/plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+			setText('#planOut', fmt(r));
+		}
+		async function runChat(){
+			const body={messages:[{role:'user', content: $('#chatPrompt').value}]};
+			const r = await api('/llm/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+			setText('#chatOut', fmt(r));
+		}
+		let evtSrc=null;
+		function startEvents(){
+			if(evtSrc){evtSrc.close();}
+			$('#eventsState').textContent='events: connecting';
+			const key=$('#apiKey').value.trim();
+			evtSrc = new EventSource('/events?token='+encodeURIComponent(key));
+			evtSrc.onopen=()=>$('#eventsState').textContent='events: open';
+			evtSrc.onmessage=e=>{ const pre=$('#eventsOut'); pre.textContent += '\n'+e.data; pre.scrollTop=pre.scrollHeight; };
+			evtSrc.onerror=()=>$('#eventsState').textContent='events: error';
+		}
+		async function loadMetrics(){
+			$('#metricsState').textContent='metrics: loading';
+			const key=$('#apiKey').value.trim();
+			const r = await fetch('/metrics',{headers:{'X-API-Key':key}});
+			const txt = await r.text();
+			$('#metricsOut').textContent = txt.split('\n').slice(0,80).join('\n');
+			$('#metricsState').textContent='metrics: ok';
+		}
+
+		$('#btnMeta').onclick=loadMeta;
+		$('#btnLLM').onclick=loadLLM;
+		$('#btnPlan').onclick=runPlan;
+		$('#btnChat').onclick=runChat;
+		$('#btnEvents').onclick=startEvents;
+		$('#btnMetrics').onclick=loadMetrics;
+
+		// initial
+		loadMeta();
+		loadLLM();
+	</script>
+</body>
+</html>
