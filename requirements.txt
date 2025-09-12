@@ -1,8 +1,8 @@
 fastapi==0.111.0
 uvicorn[standard]==0.30.1
 prometheus-client==0.20.0
-pydantic==2.7.4
-PyYAML==6.0.1
+pydantic==2.9.2
+PyYAML>=6.0.1,<6.1  # allow wheel if available
 sqlite-utils==3.36
 anyio==4.4.0
 pytest==8.2.2

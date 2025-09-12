@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual envs
+.venv/
+venv/
+ENV/
+
+# Environment variables (contains GROQ_API_KEY, API_TOKEN, etc.)
+.env
+
+# SQLite database
+agent.db*
+*.sqlite3
+
+# Plans / generated artifacts
+plans/
+
+# Logs / temp
+*.log
+logs/
+.tmp/
+.cache/
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Coverage / test
+htmlcov/
+.coverage*
+.pytest_cache/
+
+# Node (if UI extended later)
+node_modules/
+
+# Dist / build
+build/
+dist/
+
+# Backup
+*~

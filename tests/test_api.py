@@ -12,6 +12,7 @@ from api.app import app  # noqa: E402
 
 API_KEY = os.getenv("TEST_API_KEY", "test")
 H = {"X-API-Key": API_KEY}
+AUTH_HEADER = H  # backward compatibility alias
 
 @pytest.mark.asyncio
 async def test_auth_missing():

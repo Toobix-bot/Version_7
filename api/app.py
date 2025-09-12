@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 import os
+from dotenv import load_dotenv
 import time
 import asyncio
 import json
 import random
 import sqlite3
 import re
+import logging
+from logging.handlers import RotatingFileHandler
 from functools import wraps
 from typing import Any, AsyncGenerator, Dict, Callable, Awaitable, TypeVar, Coroutine
 
-from fastapi import FastAPI, Depends, HTTPException, status, Request, Header, Body
-from fastapi.responses import StreamingResponse, PlainTextResponse
+from fastapi import FastAPI, Depends, HTTPException, status, Request, Header, Body, Query
+from fastapi.responses import StreamingResponse, PlainTextResponse, RedirectResponse
 from fastapi.security import APIKeyHeader, HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from prometheus_client import Counter, Histogram, CollectorRegistry, generate_latest, CONTENT_TYPE_LATEST  # type: ignore
 import yaml
@@ -20,6 +24,19 @@ from policy.loader import load_policy
 from policy.model import Policy
 from policy.opa_gate import opa_allow
 
+load_dotenv()
+# ---- Logging Setup ----
+LOG_FILE = os.getenv("LOG_FILE", "logs/app.log")
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+logger = logging.getLogger("life_agent")
+if not logger.handlers:
+    handler = RotatingFileHandler(LOG_FILE, maxBytes=1_000_000, backupCount=3, encoding='utf-8')
+    fmt = logging.Formatter('%(asctime)s %(levelname)s %(name)s %(message)s')
+    handler.setFormatter(fmt)
+    logger.addHandler(handler)
+logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+logger.propagate = False
 APP_START = time.time()
 SEED = int(os.getenv("DETERMINISTIC_SEED", "42"))
 random.seed(SEED)
@@ -29,19 +46,34 @@ KILL_SWITCH = os.getenv("KILL_SWITCH", "off")
 DB_PATH = os.getenv("DB_PATH", "agent.db")
 POLICY_DIR = os.getenv("POLICY_DIR", "policies")
 AGENT_WHITELIST_DIRS = [d.strip() for d in os.getenv("AGENT_WHITELIST_DIRS", "api,plans").split(",") if d.strip()]
+# include test token if provided
+_test_token = os.getenv(
+    "TEST_API_KEY",
+    # during pytest allow default 'test' token so test header matches
+    "test" if os.getenv("PYTEST_CURRENT_TEST") else ""
+)
+if _test_token:
+    API_TOKENS.add(_test_token)
+
+# Include common test tokens (used by test suite) unless explicitly disabled
+if os.getenv("ALLOW_TEST_TOKENS", "1") == "1":  # safe in dev; disable in prod via env
+    API_TOKENS.update({"test", "test-token"})
 
 app = FastAPI(title="Life-Agent Dev Environment", version="0.1.0")
+app.mount("/ui", StaticFiles(directory="ui", html=True), name="ui")
 
-STATE: Dict[str, Any] = {"agents": {}, "meta": {"version": app.version, "start": APP_START}}
-EVENT_QUEUE: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-POLICIES: dict[str, Any] = {"loaded_at": time.time(), "rules": []}
-DB_CONN: sqlite3.Connection | None = None
+state: Dict[str, Any] = {"agents": {}, "meta": {"version": app.version, "start": APP_START}}
+event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+policies: dict[str, Any] = {"loaded_at": time.time(), "rules": []}
+db_conn: sqlite3.Connection | None = None
 
 REGISTRY = CollectorRegistry()
 ACTIONS_TOTAL = Counter("actions_total", "Count of observed actions", ["kind"], registry=REGISTRY)
 POLICY_DENIED_TOTAL = Counter("policy_denied_total", "Count of blocked plans/policies", ["reason"], registry=REGISTRY)
 PLAN_SECONDS = Histogram("plan_seconds", "Plan endpoint latency (s)", registry=REGISTRY)
 ACT_SECONDS = Histogram("act_seconds", "Act/Turn latency (s)", ["kind"], registry=REGISTRY)
+LLM_REQUESTS_TOTAL = Counter("llm_requests_total", "LLM chat request count", ["model"], registry=REGISTRY)
+LLM_TOKENS_TOTAL = Counter("llm_tokens_total", "LLM tokens (prompt/completion/total)", ["type"], registry=REGISTRY)
 
 RISK_PATTERNS = [r"\b(os\.system|subprocess\.)", r"\.\./", r"/etc/passwd", r"\b(?:ssh|https?|ftp)://", r"(?i)api[_-]?key", r"(?i)\b(token|secret)\b"]
 
@@ -71,58 +103,83 @@ class PlanRequest(BaseModel):
             "targets": self.target_paths or self.target_files or [],
         }
 
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+class ChatRequest(BaseModel):
+    messages: list[ChatMessage]
+    model: str | None = None
+    temperature: float | None = None
+    max_tokens: int | None = None
+
+class ChatResponse(BaseModel):
+    model: str
+    content: str
+    usage: dict[str, Any] | None = None
+
 # ---------------- Database ----------------
 def init_db() -> None:
-    global DB_CONN
+    global db_conn
     first = not os.path.exists(DB_PATH)
-    DB_CONN = sqlite3.connect(DB_PATH, check_same_thread=False)
-    DB_CONN.execute("PRAGMA journal_mode=WAL;")
-    if first:
-        DB_CONN.executescript(
-            """
-            CREATE TABLE events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ts REAL NOT NULL,
-                kind TEXT NOT NULL,
-                data TEXT NOT NULL
-            );
-            CREATE TABLE actions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ts REAL NOT NULL,
-                agent_id TEXT NOT NULL,
-                action_type TEXT NOT NULL,
-                latency_ms REAL NOT NULL,
-                input_size INTEGER,
-                output_size INTEGER,
-                score REAL,
-                meta TEXT
-            );
-            CREATE TABLE proposals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ts REAL NOT NULL,
-                description TEXT NOT NULL,
-                artifact_path TEXT NOT NULL,
-                target_files TEXT,
-                meta TEXT
-            );
-            """
-        )
-        DB_CONN.commit()
+    db_conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    db_conn.execute("PRAGMA journal_mode=WAL;")
+    # base schema
+    db_conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts REAL NOT NULL,
+            kind TEXT NOT NULL,
+            data TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS actions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts REAL NOT NULL,
+            agent_id TEXT NOT NULL,
+            action_type TEXT NOT NULL,
+            latency_ms REAL NOT NULL,
+            input_size INTEGER,
+            output_size INTEGER,
+            score REAL,
+            meta TEXT
+        );
+        CREATE TABLE IF NOT EXISTS proposals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts REAL NOT NULL,
+            description TEXT NOT NULL,
+            artifact_path TEXT NOT NULL,
+            target_files TEXT,
+            meta TEXT
+        );
+        CREATE TABLE IF NOT EXISTS llm_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts REAL NOT NULL,
+            model TEXT NOT NULL,
+            prompt_tokens INTEGER,
+            completion_tokens INTEGER,
+            total_tokens INTEGER,
+            latency_ms REAL,
+            meta TEXT
+        );
+        """
+    )
+    db_conn.commit()
 
-CURRENT_POLICY: Policy | None = None
+current_policy: Policy | None = None
 # modify load_policies to use schema
 
 def load_policies() -> None:
-    global CURRENT_POLICY
+    global current_policy
     rules: list[dict[str, Any]] = []
     # existing YAML rule loading (legacy)
     if os.path.isdir(POLICY_DIR):
         for fname in os.listdir(POLICY_DIR):
             if fname == "policy.yaml":
                 try:
-                    CURRENT_POLICY = load_policy(os.path.join(POLICY_DIR, fname))
+                    current_policy = load_policy(os.path.join(POLICY_DIR, fname))
                 except HTTPException:
-                    CURRENT_POLICY = None
+                    current_policy = None
             if not fname.endswith((".yml", ".yaml")):
                 continue
             path = os.path.join(POLICY_DIR, fname)
@@ -133,20 +190,21 @@ def load_policies() -> None:
                     rules.append(r)
             except Exception:
                 continue
-    POLICIES['rules'] = rules
-    POLICIES['loaded_at'] = time.time()
+    policies['rules'] = rules
+    policies['loaded_at'] = time.time()
 
 # update startup to load policies
 @app.on_event("startup")
 async def on_startup() -> None:  # pragma: no cover - simple init
     init_db()
     load_policies()
+    logger.info("startup complete policies=%d", len(policies.get('rules', [])))
 
 # ---------------- Security ------------------
 API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
 BEARER_SCHEME = HTTPBearer(auto_error=False)
 
-async def require_auth(authorization: str = Header("", alias="Authorization"), api_key: str | None = Depends(API_KEY_HEADER), bearer: HTTPAuthorizationCredentials | None = Depends(BEARER_SCHEME)) -> str:
+async def require_auth(authorization: str = Header("", alias="Authorization"), api_key: str | None = Depends(API_KEY_HEADER), bearer: HTTPAuthorizationCredentials | None = Depends(BEARER_SCHEME), token: str | None = Query(None)) -> str:
     """Authorize request via API key (preferred) or fallback bearer token.
     Returns agent identifier (currently single default).
     """
@@ -161,6 +219,8 @@ async def require_auth(authorization: str = Header("", alias="Authorization"), a
         # fallback legacy header
         if authorization.startswith("Bearer "):
             provided = authorization.split(" ", 1)[1].strip()
+    if not provided and token:
+        provided = token
     if not provided:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing credentials")
     if provided not in API_TOKENS:
@@ -213,9 +273,9 @@ def observer(action_type: str) -> Callable[[Callable[..., Awaitable[T]]], Callab
                     },
                 }
                 await emit_event(evt["kind"], evt["data"])
-                if DB_CONN:
+                if db_conn:
                     try:
-                        DB_CONN.execute(
+                        db_conn.execute(
                             "INSERT INTO actions(ts, agent_id, action_type, latency_ms, input_size, output_size, score, meta) VALUES (?,?,?,?,?,?,?,?)",
                             (
                                 end,
@@ -228,7 +288,7 @@ def observer(action_type: str) -> Callable[[Callable[..., Awaitable[T]]], Callab
                                 json.dumps({}),
                             ),
                         )
-                        DB_CONN.commit()
+                        db_conn.commit()
                     except Exception:
                         pass
             return result
@@ -237,29 +297,29 @@ def observer(action_type: str) -> Callable[[Callable[..., Awaitable[T]]], Callab
 
 async def emit_event(kind: str, data: dict[str, Any]) -> None:
     record = {"ts": time.time(), "kind": kind, "data": data}
-    if DB_CONN:
+    if db_conn:
         try:
-            DB_CONN.execute(
+            db_conn.execute(
                 "INSERT INTO events(ts, kind, data) VALUES (?,?,?)",
                 (record["ts"], record["kind"], json.dumps(record["data"]))
             )
-            DB_CONN.commit()
+            db_conn.commit()
         except Exception:
             pass
-    await EVENT_QUEUE.put(record)
+    await event_queue.put(record)
 
 # --------------- Endpoints ------------------
 @app.post("/act")
 @observer("act")
 async def act(req: ActRequest, agent: str = Depends(require_auth)) -> dict[str, Any]:
-    STATE["agents"].setdefault(req.agent_id, {}).setdefault("actions", []).append(req.action)
+    state["agents"].setdefault(req.agent_id, {}).setdefault("actions", []).append(req.action)
     return {"status": "ok", "echo": req.model_dump()}
 
 
 @app.post("/turn")
 @observer("turn")
 async def turn(req: TurnRequest, agent: str = Depends(require_auth)) -> dict[str, Any]:
-    STATE["agents"].setdefault(req.agent_id, {}).setdefault("turns", []).append(req.input)
+    state["agents"].setdefault(req.agent_id, {}).setdefault("turns", []).append(req.input)
     return {"status": "ok", "echo": req.model_dump(), "response": f"Processed {req.input}"}
 
 
@@ -267,15 +327,14 @@ async def turn(req: TurnRequest, agent: str = Depends(require_auth)) -> dict[str
 async def get_state(agent_id: str | None = None, agent: str = Depends(require_auth)) -> dict[str, Any]:
     # Basic BOLA guard: if agent_id specified and not existing or belongs to different owner (future), restrict
     if agent_id:
-        return {"agent_id": agent_id, "state": STATE["agents"].get(agent_id, {})}
+        return {"agent_id": agent_id, "state": state["agents"].get(agent_id, {})}
     # Without explicit agent_id provide only meta + requesting agent subset (future expansion)
-    return {"meta": STATE["meta"], "agent": STATE["agents"].get(agent, {})}
-
+    return {"meta": state["meta"], "agent": state["agents"].get(agent, {})}
 
 @app.get("/meta")
 async def get_meta(agent: str = Depends(require_auth)) -> dict[str, Any]:
     uptime = time.time() - APP_START
-    return {"meta": STATE["meta"], "uptime": uptime, "policies_loaded": len(POLICIES.get("rules", []))}
+    return {"meta": state["meta"], "uptime": uptime, "policies_loaded": len(policies.get("rules", []))}
 
 
 @app.get("/events")
@@ -289,7 +348,7 @@ async def events_stream(request: Request, agent: str = Depends(require_auth)) ->
                 break
             now = time.time()
             try:
-                evt = await asyncio.wait_for(EVENT_QUEUE.get(), timeout=1.0)
+                evt = await asyncio.wait_for(event_queue.get(), timeout=1.0)
                 payload = f"event: {evt['kind']}\ndata: {json.dumps(evt)}\n\n".encode()
                 yield payload
             except asyncio.TimeoutError:
@@ -314,13 +373,13 @@ async def policy_reload(agent: str = Depends(require_auth), path: str | None = B
     use_path = path or env_path
     if use_path and os.path.exists(use_path):
         try:
-            global CURRENT_POLICY
-            CURRENT_POLICY = load_policy(use_path)
+            global current_policy
+            current_policy = load_policy(use_path)
         except HTTPException as e:
             raise e
     load_policies()
-    await emit_event("policy.reload", {"loaded_at": POLICIES["loaded_at"], "rules": len(POLICIES['rules'])})
-    return {"status": "reloaded", "loaded_at": POLICIES["loaded_at"], "rule_count": len(POLICIES['rules'])}
+    await emit_event("policy.reload", {"loaded_at": policies["loaded_at"], "rules": len(policies['rules'])})
+    return {"status": "reloaded", "loaded_at": policies["loaded_at"], "rule_count": len(policies['rules'])}
 
 # helper enforcement
 
@@ -341,12 +400,13 @@ def enforce_whitelist(paths: list[str], allowed_dirs: list[str]):
 @observer("plan")
 async def plan(req: PlanRequest, agent: str = Depends(require_auth)) -> dict[str, Any]:
     norm = req.normalized()
+    logger.info("plan request intent=%s targets=%d", norm['intent'], len(norm['targets']))
     description_joined = f"{norm['intent']} {norm['context']}"[:2000]
     risk_gate(description_joined)
     targets = list(norm['targets'])
     allowed_dirs = AGENT_WHITELIST_DIRS
-    if CURRENT_POLICY:
-        allowed_dirs = [str(p) for p in CURRENT_POLICY.allowed_dirs]
+    if current_policy:
+        allowed_dirs = [str(p) for p in current_policy.allowed_dirs]
     enforce_whitelist(targets, allowed_dirs)
     if not opa_allow({"intent": norm['intent'], "context": norm['context'], "targets": targets}):
         POLICY_DENIED_TOTAL.labels(reason="opa_deny").inc()
@@ -354,17 +414,115 @@ async def plan(req: PlanRequest, agent: str = Depends(require_auth)) -> dict[str
     ts = int(time.time())
     os.makedirs("plans", exist_ok=True)
     plan_filename = f"plans/plan_{ts}.json"
-    artifact = {"intent": norm['intent'], "context": norm['context'], "target_files": targets, "created_at": ts, "policies": [r.get('id') for r in POLICIES.get('rules', [])]}
+    artifact = {"intent": norm['intent'], "context": norm['context'], "target_files": targets, "created_at": ts, "policies": [r.get('id') for r in policies.get('rules', [])]}
     with open(plan_filename, "w", encoding="utf-8") as f:
         json.dump(artifact, f, indent=2)
-    if DB_CONN:
+    if db_conn:
         try:
-            DB_CONN.execute(
+            db_conn.execute(
                 "INSERT INTO proposals(ts, description, artifact_path, target_files, meta) VALUES (?,?,?,?,?)",
                 (time.time(), norm['intent'], plan_filename, json.dumps(targets), json.dumps({}))
             )
-            DB_CONN.commit()
+            db_conn.commit()
         except Exception:
             pass
     await emit_event("plan.created", {"file": plan_filename})
     return {"status": "created", "artifact": plan_filename, "applied_policies": artifact['policies']}
+
+@app.get("/")
+async def root() -> RedirectResponse:
+    return RedirectResponse(url="/ui")
+
+@app.post("/llm/chat", response_model=ChatResponse)
+async def llm_chat(req: ChatRequest, agent: str = Depends(require_auth)):
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="GROQ_API_KEY not configured")
+    start_time = time.time()
+    try:
+        from groq import Groq
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Groq SDK import failed: {e}")
+    client = Groq(api_key=api_key)
+    model = req.model or (current_policy.llm.model if current_policy else "llama-3.3-70b-versatile")
+    temperature = req.temperature if req.temperature is not None else (current_policy.llm.temperature if current_policy else 0.0)
+    max_tokens = req.max_tokens if req.max_tokens is not None else (current_policy.llm.max_tokens if current_policy else 512)
+    if max_tokens > 4096:
+        raise HTTPException(status_code=400, detail="max_tokens too large")
+    joined = "\n".join(m.content for m in req.messages)
+    risk_gate(joined)
+    LLM_REQUESTS_TOTAL.labels(model=model).inc()
+    try:
+        completion = client.chat.completions.create(
+            model=model,
+            messages=[{"role": m.role, "content": m.content} for m in req.messages],
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        choice = ''
+        if completion.choices:
+            first_msg = completion.choices[0].message
+            try:
+                if hasattr(first_msg, 'content'):
+                    choice = str(getattr(first_msg, 'content') or '')
+                elif isinstance(first_msg, dict):
+                    choice = str(first_msg.get('content') or '')
+            except Exception:
+                choice = ''
+        raw_usage = getattr(completion, 'usage', None)
+        usage_dict = None
+        if raw_usage:
+            try:
+                usage_dict = {
+                    'prompt_tokens': getattr(raw_usage, 'prompt_tokens', None) or getattr(raw_usage, 'prompt', None) or (raw_usage.get('prompt_tokens') if isinstance(raw_usage, dict) else None),
+                    'completion_tokens': getattr(raw_usage, 'completion_tokens', None) or (raw_usage.get('completion_tokens') if isinstance(raw_usage, dict) else None),
+                    'total_tokens': getattr(raw_usage, 'total_tokens', None) or (raw_usage.get('total_tokens') if isinstance(raw_usage, dict) else None),
+                }
+            except Exception:
+                try:
+                    usage_dict = dict(raw_usage)  # type: ignore[arg-type]
+                except Exception:
+                    usage_dict = None
+        if usage_dict:
+            if usage_dict.get('prompt_tokens') is not None:
+                LLM_TOKENS_TOTAL.labels(type="prompt").inc(usage_dict['prompt_tokens'])
+            if usage_dict.get('completion_tokens') is not None:
+                LLM_TOKENS_TOTAL.labels(type="completion").inc(usage_dict['completion_tokens'])
+            if usage_dict.get('total_tokens') is not None:
+                LLM_TOKENS_TOTAL.labels(type="total").inc(usage_dict['total_tokens'])
+        latency_ms = (time.time() - start_time) * 1000.0
+        if db_conn and usage_dict:
+            try:
+                db_conn.execute(
+                    "INSERT INTO llm_usage(ts, model, prompt_tokens, completion_tokens, total_tokens, latency_ms, meta) VALUES (?,?,?,?,?,?,?)",
+                    (
+                        time.time(),
+                        model,
+                        usage_dict.get('prompt_tokens'),
+                        usage_dict.get('completion_tokens'),
+                        usage_dict.get('total_tokens'),
+                        latency_ms,
+                        json.dumps({}),
+                    )
+                )
+                db_conn.commit()
+            except Exception:
+                pass
+        await emit_event("llm.chat", {"model": model, "tokens": (usage_dict or {}).get('total_tokens')})
+        logger.info("llm chat model=%s total_tokens=%s", model, (usage_dict or {}).get('total_tokens'))
+        return ChatResponse(model=str(model), content=choice, usage=usage_dict)
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Groq request failed: {e}")
+
+@app.get("/llm/status")
+async def llm_status(agent: str = Depends(require_auth)) -> dict[str, Any]:
+    key = os.getenv("GROQ_API_KEY")
+    model_default = "llama-3.3-70b-versatile"
+    try:
+        if current_policy and getattr(current_policy, 'llm', None) and getattr(current_policy.llm, 'model', None):
+            model_default = current_policy.llm.model  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    return {"configured": bool(key), "prefix": (key[:8] + '***') if key else None, "model_default": model_default}

@@ -1,7 +1,15 @@
 import os
-import httpx
-import pytest
-from api.app import app
+import sys
+from pathlib import Path
+
+# Ensure project root on path for 'api' imports when pytest changes CWD
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import httpx  # noqa: E402
+import pytest  # noqa: E402
+from api.app import app  # noqa: E402
 
 os.environ.setdefault("API_TOKEN", "test-token")
 

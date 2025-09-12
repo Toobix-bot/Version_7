@@ -45,6 +45,30 @@ Invalid policy reload returns 422 with structured errors.
 3. Run: `uvicorn api.app:app --reload`
 4. Visit `/docs` for OpenAPI with security schemes.
 
+### Quick Start Script (Windows PowerShell)
+Use the helper script to start with correct env:
+
+```
+pwsh -ExecutionPolicy Bypass -File scripts/run_dev.ps1 -BindHost 127.0.0.1 -Port 8000 -Reload
+```
+
+Parameters:
+- `-BindHost` host interface (default 127.0.0.1)
+- `-Port` port (default 8000)
+- `-Reload` include flag to enable auto-reload
+- `-ApiKey` override API token for this session
+
+Then in a second terminal:
+```
+Invoke-WebRequest -Uri http://127.0.0.1:8000/meta -Headers @{ 'X-API-Key'='test' } -UseBasicParsing
+```
+
+### Windows Batch Alternative
+```
+scripts\run_dev.cmd -Port 8000 -BindHost 127.0.0.1 -ApiKey test -Reload
+```
+Omit `-Reload` for production-like run.
+
 ## CI Security
 - pip-audit (fails on HIGH+)
 - Bandit (level high -lll)
@@ -57,4 +81,21 @@ Plans produce JSON artifacts in `plans/` only (PR-only workflow), snapshot scrip
 - Async tests use `httpx.ASGITransport` (see `tests/conftest.py`).
 - Run: `pytest -q`
 - Write endpoints require `X-API-Key`; tests set `API_TOKENS=test`/`X-API-Key: test`.
+
+## Logging
+- Set `LOG_FILE` (default `logs/app.log`) and optional `LOG_LEVEL` (INFO, DEBUG, ...).
+- Both helper scripts accept a log destination:
+	- PowerShell: `-LogFile logs/app.log`
+	- Batch: `-LogFile logs\app.log`
+- Rotating handler keeps up to 3 backups of ~1MB each.
+
+## .env Auto Load
+Both `run_dev.ps1` and `run_dev.cmd` parse a root `.env` (simple KEY=VALUE) before starting.
+
+## LLM Test
+Ensure you set `GROQ_API_KEY` in `.env`, then:
+```
+python examples/llm_test.py
+```
+It first hits `/llm/status`, then `/llm/chat` with a minimal prompt if configured.
 
