@@ -1,0 +1,10 @@
+version: "1"
+allowed_dirs:
+  - allowed
+deny_globs:
+  - "**/*.env"
+max_diff_lines: 800
+llm:
+  model: llama-3.3-70b-versatile
+  temperature: 0
+  max_tokens: 2048

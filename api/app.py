@@ -6,19 +6,25 @@ import asyncio
 import json
 import random
 import sqlite3
+import re
 from functools import wraps
 from typing import Any, AsyncGenerator, Dict, Callable, Awaitable, TypeVar, Coroutine
 
-from fastapi import FastAPI, Depends, HTTPException, status, Request, Header
+from fastapi import FastAPI, Depends, HTTPException, status, Request, Header, Body
 from fastapi.responses import StreamingResponse, PlainTextResponse
+from fastapi.security import APIKeyHeader, HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
-from prometheus_client import Counter, Histogram, CollectorRegistry, generate_latest
+from prometheus_client import Counter, Histogram, CollectorRegistry, generate_latest, CONTENT_TYPE_LATEST  # type: ignore
 import yaml
+from policy.loader import load_policy
+from policy.model import Policy
+from policy.opa_gate import opa_allow
 
 APP_START = time.time()
 SEED = int(os.getenv("DETERMINISTIC_SEED", "42"))
 random.seed(SEED)
 API_TOKEN = os.getenv("API_TOKEN", "changeme-dev-token")
+API_TOKENS = {t.strip() for t in os.getenv("API_TOKENS", API_TOKEN).split(",") if t.strip()}
 KILL_SWITCH = os.getenv("KILL_SWITCH", "off")
 DB_PATH = os.getenv("DB_PATH", "agent.db")
 POLICY_DIR = os.getenv("POLICY_DIR", "policies")
@@ -32,9 +38,12 @@ POLICIES: dict[str, Any] = {"loaded_at": time.time(), "rules": []}
 DB_CONN: sqlite3.Connection | None = None
 
 REGISTRY = CollectorRegistry()
-METR_REQ = Counter("api_requests_total", "Total API requests", ["endpoint"], registry=REGISTRY)
-METR_ERR = Counter("api_errors_total", "Total API errors", ["endpoint"], registry=REGISTRY)
-METR_LAT = Histogram("action_latency_ms", "Latency of observed actions (ms)", ["action_type"], registry=REGISTRY)
+ACTIONS_TOTAL = Counter("actions_total", "Count of observed actions", ["kind"], registry=REGISTRY)
+POLICY_DENIED_TOTAL = Counter("policy_denied_total", "Count of blocked plans/policies", ["reason"], registry=REGISTRY)
+PLAN_SECONDS = Histogram("plan_seconds", "Plan endpoint latency (s)", registry=REGISTRY)
+ACT_SECONDS = Histogram("act_seconds", "Act/Turn latency (s)", ["kind"], registry=REGISTRY)
+
+RISK_PATTERNS = [r"\b(os\.system|subprocess\.)", r"\.\./", r"/etc/passwd", r"\b(?:ssh|https?|ftp)://", r"(?i)api[_-]?key", r"(?i)\b(token|secret)\b"]
 
 # ---------------- Models ------------------
 class ActRequest(BaseModel):
@@ -47,8 +56,20 @@ class TurnRequest(BaseModel):
     input: str
 
 class PlanRequest(BaseModel):
-    description: str
+    # legacy fields
+    description: str | None = None
     target_files: list[str] | None = None
+    # new schema
+    intent: str | None = None
+    context: str | None = None
+    target_paths: list[str] | None = None
+
+    def normalized(self) -> dict[str, Any]:
+        return {
+            "intent": self.intent or (self.description or "").split("\n", 1)[0],
+            "context": self.context or (self.description or ""),
+            "targets": self.target_paths or self.target_files or [],
+        }
 
 # ---------------- Database ----------------
 def init_db() -> None:
@@ -88,17 +109,27 @@ def init_db() -> None:
         )
         DB_CONN.commit()
 
+CURRENT_POLICY: Policy | None = None
+# modify load_policies to use schema
+
 def load_policies() -> None:
+    global CURRENT_POLICY
     rules: list[dict[str, Any]] = []
+    # existing YAML rule loading (legacy)
     if os.path.isdir(POLICY_DIR):
         for fname in os.listdir(POLICY_DIR):
-            if not fname.endswith(('.yml', '.yaml')):
+            if fname == "policy.yaml":
+                try:
+                    CURRENT_POLICY = load_policy(os.path.join(POLICY_DIR, fname))
+                except HTTPException:
+                    CURRENT_POLICY = None
+            if not fname.endswith((".yml", ".yaml")):
                 continue
             path = os.path.join(POLICY_DIR, fname)
             try:
                 with open(path, 'r', encoding='utf-8') as f:
                     doc = yaml.safe_load(f) or {}
-                for r in doc.get('rules', []):  # type: ignore[assignment]
+                for r in doc.get('rules', []):
                     rules.append(r)
             except Exception:
                 continue
@@ -112,15 +143,28 @@ async def on_startup() -> None:  # pragma: no cover - simple init
     load_policies()
 
 # ---------------- Security ------------------
-async def require_auth(authorization: str = Header("", alias="Authorization")) -> str:
+API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
+BEARER_SCHEME = HTTPBearer(auto_error=False)
+
+async def require_auth(authorization: str = Header("", alias="Authorization"), api_key: str | None = Depends(API_KEY_HEADER), bearer: HTTPAuthorizationCredentials | None = Depends(BEARER_SCHEME)) -> str:
+    """Authorize request via API key (preferred) or fallback bearer token.
+    Returns agent identifier (currently single default).
+    """
     if KILL_SWITCH.lower() == "on":
         raise HTTPException(status_code=503, detail="Kill switch active")
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
-    token = authorization.split(" ", 1)[1].strip()
-    if token != API_TOKEN:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-    # For future multi-agent: agent id could be embedded; return token owner
+    provided = None
+    if api_key:
+        provided = api_key
+    elif bearer and bearer.scheme.lower() == "bearer":
+        provided = bearer.credentials
+    else:
+        # fallback legacy header
+        if authorization.startswith("Bearer "):
+            provided = authorization.split(" ", 1)[1].strip()
+    if not provided:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing credentials")
+    if provided not in API_TOKENS:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     return "default-agent"
 
 # ---------------- Observability -------------
@@ -131,12 +175,12 @@ def observer(action_type: str) -> Callable[[Callable[..., Awaitable[T]]], Callab
         @wraps(func)
         async def wrapper(*args, **kwargs) -> T:  # type: ignore[override]
             start = time.time()
-            # record request count
-            METR_REQ.labels(endpoint=action_type).inc()
+            # metrics request count
+            ACTIONS_TOTAL.labels(kind=action_type).inc()
             input_repr = ""
             if args:
                 try:
-                    input_repr = json.dumps(args[1].__dict__)[:500]  # skip self if method
+                    input_repr = json.dumps(getattr(args[1], "__dict__", {}))[:500]
                 except Exception:
                     input_repr = "<unserializable>"
             try:
@@ -149,13 +193,16 @@ def observer(action_type: str) -> Callable[[Callable[..., Awaitable[T]]], Callab
             finally:
                 end = time.time()
                 latency_ms = (end - start) * 1000
-                METR_LAT.labels(action_type=action_type).observe(latency_ms)
+                if action_type == "plan":
+                    PLAN_SECONDS.observe(end - start)
+                elif action_type in ("act", "turn"):
+                    ACT_SECONDS.labels(kind=action_type).observe(end - start)
                 output_repr = ""
                 try:
                     output_repr = json.dumps(result)[:500]
                 except Exception:
                     output_repr = "<unserializable>"
-                score = None  # placeholder for future quality scoring
+                score = None
                 evt = {
                     "ts": end,
                     "kind": f"obs.{action_type}",
@@ -165,7 +212,7 @@ def observer(action_type: str) -> Callable[[Callable[..., Awaitable[T]]], Callab
                         "action_type": action_type,
                     },
                 }
-                await emit_event(evt["kind"], evt["data"])  # queue + DB
+                await emit_event(evt["kind"], evt["data"])
                 if DB_CONN:
                     try:
                         DB_CONN.execute(
@@ -234,66 +281,87 @@ async def get_meta(agent: str = Depends(require_auth)) -> dict[str, Any]:
 @app.get("/events")
 async def events_stream(request: Request, agent: str = Depends(require_auth)) -> StreamingResponse:
     async def event_gen() -> AsyncGenerator[bytes, None]:
+        yield b"retry: 5000\n"
+        yield b"event: ready\ndata: {}\n\n"
+        last_keepalive = time.time()
         while True:
             if await request.is_disconnected():
                 break
+            now = time.time()
             try:
                 evt = await asyncio.wait_for(EVENT_QUEUE.get(), timeout=1.0)
                 payload = f"event: {evt['kind']}\ndata: {json.dumps(evt)}\n\n".encode()
                 yield payload
             except asyncio.TimeoutError:
-                # send heartbeat comment
-                yield b":heartbeat\n\n"
+                pass
+            if now - last_keepalive >= 15:
+                yield b":keepalive\n\n"
+                last_keepalive = now
     return StreamingResponse(event_gen(), media_type="text/event-stream")
 
 
 @app.get("/metrics")
 async def metrics() -> PlainTextResponse:
-    uptime = time.time() - APP_START
-    # custom gauge style lines appended to generated metrics
-    extra = f"app_uptime_seconds {uptime:.2f}\npolicy_rules_loaded {len(POLICIES.get('rules', []))}\n"
-    data = generate_latest(REGISTRY).decode() + extra
-    return PlainTextResponse(data, media_type="text/plain")
+    data = generate_latest(REGISTRY)
+    return PlainTextResponse(data, media_type=CONTENT_TYPE_LATEST)
 
 
 @app.post("/policy/reload")
-async def policy_reload(agent: str = Depends(require_auth)) -> dict[str, Any]:
+async def policy_reload(agent: str = Depends(require_auth), path: str | None = Body(default=None)) -> dict[str, Any]:
+    env_path = os.getenv("POLICY_PATH")
+    if path:
+        os.environ["POLICY_PATH"] = path
+    use_path = path or env_path
+    if use_path and os.path.exists(use_path):
+        try:
+            global CURRENT_POLICY
+            CURRENT_POLICY = load_policy(use_path)
+        except HTTPException as e:
+            raise e
     load_policies()
     await emit_event("policy.reload", {"loaded_at": POLICIES["loaded_at"], "rules": len(POLICIES['rules'])})
     return {"status": "reloaded", "loaded_at": POLICIES["loaded_at"], "rule_count": len(POLICIES['rules'])}
 
 # helper enforcement
 
-def enforce_plan(target_files: list[str]) -> None:
-    deny_paths = []
-    for r in POLICIES.get('rules', []):
-        if 'paths_deny' in r:
-            deny_paths.extend(r['paths_deny'])
-    for tf in target_files:
-        # whitelist check
-        if not any(tf.startswith(w + "/") or tf == w for w in AGENT_WHITELIST_DIRS):
-            raise HTTPException(status_code=400, detail=f"Target file not in whitelist: {tf}")
-        for dp in deny_paths:
-            if dp and dp in tf:
-                raise HTTPException(status_code=400, detail=f"Target path denied by policy: {dp}")
+def risk_gate(text: str):
+    for pat in RISK_PATTERNS:
+        if re.search(pat, text or ""):
+            POLICY_DENIED_TOTAL.labels(reason="risk_pattern").inc()
+            raise HTTPException(status_code=422, detail={"code": "prompt_risky", "pattern": pat})
+
+def enforce_whitelist(paths: list[str], allowed_dirs: list[str]):
+    for p in paths or []:
+        if not any(p.startswith(d.rstrip("/") + "/") or p == d for d in allowed_dirs):
+            POLICY_DENIED_TOTAL.labels(reason="path_forbidden").inc()
+            raise HTTPException(status_code=403, detail={"code": "path_forbidden", "path": p})
 
 
 @app.post("/plan")
 @observer("plan")
 async def plan(req: PlanRequest, agent: str = Depends(require_auth)) -> dict[str, Any]:
-    targets = req.target_files or []
-    enforce_plan(targets)
+    norm = req.normalized()
+    description_joined = f"{norm['intent']} {norm['context']}"[:2000]
+    risk_gate(description_joined)
+    targets = list(norm['targets'])
+    allowed_dirs = AGENT_WHITELIST_DIRS
+    if CURRENT_POLICY:
+        allowed_dirs = [str(p) for p in CURRENT_POLICY.allowed_dirs]
+    enforce_whitelist(targets, allowed_dirs)
+    if not opa_allow({"intent": norm['intent'], "context": norm['context'], "targets": targets}):
+        POLICY_DENIED_TOTAL.labels(reason="opa_deny").inc()
+        raise HTTPException(status_code=403, detail={"code": "opa_deny"})
     ts = int(time.time())
     os.makedirs("plans", exist_ok=True)
     plan_filename = f"plans/plan_{ts}.json"
-    artifact = {"description": req.description, "target_files": targets, "created_at": ts, "policies": [r.get('id') for r in POLICIES.get('rules', [])]}
+    artifact = {"intent": norm['intent'], "context": norm['context'], "target_files": targets, "created_at": ts, "policies": [r.get('id') for r in POLICIES.get('rules', [])]}
     with open(plan_filename, "w", encoding="utf-8") as f:
         json.dump(artifact, f, indent=2)
     if DB_CONN:
         try:
             DB_CONN.execute(
                 "INSERT INTO proposals(ts, description, artifact_path, target_files, meta) VALUES (?,?,?,?,?)",
-                (time.time(), req.description, plan_filename, json.dumps(req.target_files or []), json.dumps({}))
+                (time.time(), norm['intent'], plan_filename, json.dumps(targets), json.dumps({}))
             )
             DB_CONN.commit()
         except Exception:

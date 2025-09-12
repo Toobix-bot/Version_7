@@ -30,3 +30,35 @@ jobs:
         run: |
           echo "Ensuring auth on sensitive endpoints" \
           && grep -R "@app.get(\"/metrics\")" -n api && echo "Metrics open by design" || true
+
+  security-pip-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - uses: pypa/gh-action-pip-audit@v1
+        with:
+          failure_threshold: high
+
+  security-bandit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install bandit
+      - run: bandit -r . -lll
+
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install mypy
+      - run: mypy api policy || true
