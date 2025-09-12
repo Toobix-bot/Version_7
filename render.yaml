@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: echo-realm
+    env: docker
+    plan: free
+    autoDeploy: true
+    envVars:
+      - key: API_KEY
+        generateValue: true
+    healthCheckPath: /healthz

@@ -1,0 +1,16 @@
+### Health
+GET https://echo-realm.onrender.com/healthz
+
+### State
+GET https://echo-realm.onrender.com/state?agent_id=test
+X-API-Key: REPLACE_KEY
+
+### Turn
+POST https://echo-realm.onrender.com/turn
+X-API-Key: REPLACE_KEY
+Content-Type: application/json
+
+{
+  "agent_id": "test",
+  "input": "untersuche das Tor der Festung"
+}

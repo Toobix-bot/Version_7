@@ -1,0 +1,106 @@
+openapi: 3.0.3
+info:
+  title: Version_7 API
+  version: 0.1.0
+  description: Basic game/agent API with turn, state, plan, llm, events.
+servers:
+  - url: https://echo-realm.onrender.com
+    description: Render production
+components:
+  securitySchemes:
+    ApiKeyHeader:
+      type: apiKey
+      in: header
+      name: X-API-Key
+security:
+  - ApiKeyHeader: []
+paths:
+  /healthz:
+    get:
+      summary: Health probe
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+  /meta:
+    get:
+      summary: Meta info
+      responses:
+        '200':
+          description: Meta
+  /state:
+    get:
+      summary: Get state
+      parameters:
+        - name: agent_id
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: State
+  /turn:
+    post:
+      summary: Process turn
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                agent_id:
+                  type: string
+                input:
+                  type: string
+      responses:
+        '200':
+          description: Turn result
+  /act:
+    post:
+      summary: Perform act
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                agent_id:
+                  type: string
+                action:
+                  type: string
+      responses:
+        '200':
+          description: Act result
+  /plan:
+    post:
+      summary: Create plan
+      responses:
+        '200':
+          description: Plan created
+  /llm/chat:
+    post:
+      summary: LLM chat
+      responses:
+        '200':
+          description: Chat response
+  /llm/status:
+    get:
+      summary: LLM status
+      responses:
+        '200':
+          description: Status
+  /events:
+    get:
+      summary: Server-Sent Events stream
+      description: text/event-stream
+      responses:
+        '200':
+          description: Stream

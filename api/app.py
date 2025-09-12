@@ -14,6 +14,7 @@ from functools import wraps
 from typing import Any, AsyncGenerator, Dict, Callable, Awaitable, TypeVar, Coroutine
 
 from fastapi import FastAPI, Depends, HTTPException, status, Request, Header, Body, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, PlainTextResponse, RedirectResponse
 from fastapi.security import APIKeyHeader, HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
@@ -23,6 +24,8 @@ import yaml
 from policy.loader import load_policy
 from policy.model import Policy
 from policy.opa_gate import opa_allow
+from fastapi.exceptions import RequestValidationError
+from starlette.responses import JSONResponse
 
 load_dotenv()
 # ---- Logging Setup ----
@@ -40,9 +43,15 @@ logger.propagate = False
 APP_START = time.time()
 SEED = int(os.getenv("DETERMINISTIC_SEED", "42"))
 random.seed(SEED)
-# Consolidated token source: API_TOKENS (comma-separated). Fallback to single legacy API_TOKEN if present.
+# Security: single API_KEY (preferred) still keeps legacy fallback for now
+PRIMARY_API_KEY = os.getenv("API_KEY")  # new single key source
 _legacy_single = os.getenv("API_TOKEN", "")
-API_TOKENS = {t.strip() for t in os.getenv("API_TOKENS", _legacy_single or "changeme-dev-token").split(",") if t.strip()}
+API_TOKENS = {t.strip() for t in os.getenv("API_TOKENS", _legacy_single).split(",") if t.strip()}
+if PRIMARY_API_KEY:
+    API_TOKENS.add(PRIMARY_API_KEY)
+if not API_TOKENS:
+    # last resort dev default - encourage override
+    API_TOKENS.add("changeme-dev-token")
 KILL_SWITCH = os.getenv("KILL_SWITCH", "off")
 DB_PATH = os.getenv("DB_PATH", "agent.db")
 POLICY_DIR = os.getenv("POLICY_DIR", "policies")
@@ -61,6 +70,70 @@ if os.getenv("ALLOW_TEST_TOKENS", "1") == "1":  # safe in dev; disable in prod v
     API_TOKENS.update({"test", "test-token"})
 
 app = FastAPI(title="Life-Agent Dev Environment", version="0.1.0")
+
+# --- CORS (restrict to required origins) ---
+ALLOWED_ORIGINS = [
+    "https://chat.openai.com",
+    "https://toobix-bot.github.io",
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"]
+)
+
+# -------- Request ID & Structured Logging Middleware --------
+import uuid
+from starlette.middleware.base import BaseHTTPMiddleware
+
+class RequestContextMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):  # type: ignore[override]
+        req_id = request.headers.get("X-Request-Id") or uuid.uuid4().hex[:12]
+        start = time.time()
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+        except Exception as e:  # noqa: BLE001
+            status_code = 500
+            logger.error(json.dumps({
+                "event": "request.error",
+                "request_id": req_id,
+                "method": request.method,
+                "path": request.url.path,
+                "error": str(e)
+            }))
+            raise
+        duration_ms = (time.time() - start) * 1000
+        logger.info(json.dumps({
+            "event": "request",
+            "request_id": req_id,
+            "method": request.method,
+            "path": request.url.path,
+            "status": status_code,
+            "duration_ms": round(duration_ms,2)
+        }))
+        response.headers["X-Request-Id"] = req_id
+        return response
+
+app.add_middleware(RequestContextMiddleware)
+
+# -------- Simple Rate Limiter --------
+RATE_LIMIT_RPS = 5
+_rate_buckets: dict[str, list[float]] = {}
+
+def rate_limit(key: str):
+    now = time.time()
+    win = 1.0
+    bucket = _rate_buckets.setdefault(key, [])
+    # prune
+    while bucket and now - bucket[0] > win:
+        bucket.pop(0)
+    if len(bucket) >= RATE_LIMIT_RPS:
+        raise _error("rate_limited", f"too many requests (>{RATE_LIMIT_RPS}/s)", 429)
+    bucket.append(now)
+
 app.mount("/ui", StaticFiles(directory="ui", html=True), name="ui")
 
 state: Dict[str, Any] = {"agents": {}, "meta": {"version": app.version, "start": APP_START}}
@@ -205,27 +278,16 @@ async def on_startup() -> None:  # pragma: no cover - simple init
 API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
 BEARER_SCHEME = HTTPBearer(auto_error=False)
 
-async def require_auth(authorization: str = Header("", alias="Authorization"), api_key: str | None = Depends(API_KEY_HEADER), bearer: HTTPAuthorizationCredentials | None = Depends(BEARER_SCHEME), token: str | None = Query(None)) -> str:
-    """Authorize request via API key (preferred) or fallback bearer token.
-    Returns agent identifier (currently single default).
-    """
+def _error(code: str, message: str, http_status: int) -> HTTPException:
+    return HTTPException(status_code=http_status, detail={"error": {"code": code, "message": message}})
+
+async def require_auth(x_api_key: str | None = Header(None, alias="X-API-Key")) -> str:
     if KILL_SWITCH.lower() == "on":
-        raise HTTPException(status_code=503, detail="Kill switch active")
-    provided = None
-    if api_key:
-        provided = api_key
-    elif bearer and bearer.scheme.lower() == "bearer":
-        provided = bearer.credentials
-    else:
-        # fallback legacy header
-        if authorization.startswith("Bearer "):
-            provided = authorization.split(" ", 1)[1].strip()
-    if not provided and token:
-        provided = token
-    if not provided:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing credentials")
-    if provided not in API_TOKENS:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+        raise _error("kill_switch", "Service disabled", 503)
+    if not x_api_key:
+        raise _error("missing_api_key", "X-API-Key header required", 401)
+    if x_api_key not in API_TOKENS:
+        raise _error("invalid_api_key", "X-API-Key invalid", 401)
     return "default-agent"
 
 # ---------------- Observability -------------
@@ -313,6 +375,7 @@ async def emit_event(kind: str, data: dict[str, Any]) -> None:
 @app.post("/act")
 @observer("act")
 async def act(req: ActRequest, agent: str = Depends(require_auth)) -> dict[str, Any]:
+    rate_limit(agent)
     state["agents"].setdefault(req.agent_id, {}).setdefault("actions", []).append(req.action)
     return {"status": "ok", "echo": req.model_dump()}
 
@@ -320,12 +383,21 @@ async def act(req: ActRequest, agent: str = Depends(require_auth)) -> dict[str, 
 @app.post("/turn")
 @observer("turn")
 async def turn(req: TurnRequest, agent: str = Depends(require_auth)) -> dict[str, Any]:
-    state["agents"].setdefault(req.agent_id, {}).setdefault("turns", []).append(req.input)
-    return {"status": "ok", "echo": req.model_dump(), "response": f"Processed {req.input}"}
+    rate_limit(agent)
+    # timeout protection
+    try:
+        async def _logic():
+            await asyncio.sleep(0)  # placeholder for heavier logic
+            state["agents"].setdefault(req.agent_id, {}).setdefault("turns", []).append(req.input)
+            return {"status": "ok", "echo": req.model_dump(), "response": f"Processed {req.input}"}
+        return await asyncio.wait_for(_logic(), timeout=5.0)
+    except asyncio.TimeoutError:
+        raise _error("timeout", "turn processing timed out", 504)
 
 
 @app.get("/state")
 async def get_state(agent_id: str | None = None, agent: str = Depends(require_auth)) -> dict[str, Any]:
+    rate_limit(agent)
     # Basic BOLA guard: if agent_id specified and not existing or belongs to different owner (future), restrict
     if agent_id:
         return {"agent_id": agent_id, "state": state["agents"].get(agent_id, {})}
@@ -334,12 +406,18 @@ async def get_state(agent_id: str | None = None, agent: str = Depends(require_au
 
 @app.get("/meta")
 async def get_meta(agent: str = Depends(require_auth)) -> dict[str, Any]:
+    rate_limit(agent)
     uptime = time.time() - APP_START
     return {"meta": state["meta"], "uptime": uptime, "policies_loaded": len(policies.get("rules", []))}
+
+@app.get("/healthz")
+async def healthz() -> dict[str, str]:
+    return {"status": "ok"}
 
 
 @app.get("/events")
 async def events_stream(request: Request, agent: str = Depends(require_auth)) -> StreamingResponse:
+    rate_limit(agent)
     async def event_gen() -> AsyncGenerator[bytes, None]:
         yield b"retry: 5000\n"
         yield b"event: ready\ndata: {}\n\n"
@@ -368,6 +446,7 @@ async def metrics() -> PlainTextResponse:
 
 @app.post("/policy/reload")
 async def policy_reload(agent: str = Depends(require_auth), path: str | None = Body(default=None)) -> dict[str, Any]:
+    rate_limit(agent)
     env_path = os.getenv("POLICY_PATH")
     if path:
         os.environ["POLICY_PATH"] = path
@@ -400,6 +479,7 @@ def enforce_whitelist(paths: list[str], allowed_dirs: list[str]):
 @app.post("/plan")
 @observer("plan")
 async def plan(req: PlanRequest, agent: str = Depends(require_auth)) -> dict[str, Any]:
+    rate_limit(agent)
     norm = req.normalized()
     logger.info("plan request intent=%s targets=%d", norm['intent'], len(norm['targets']))
     description_joined = f"{norm['intent']} {norm['context']}"[:2000]
@@ -436,6 +516,7 @@ async def root() -> RedirectResponse:
 
 @app.post("/llm/chat", response_model=ChatResponse)
 async def llm_chat(req: ChatRequest, agent: str = Depends(require_auth)):
+    rate_limit(agent)
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         raise HTTPException(status_code=503, detail="GROQ_API_KEY not configured")
@@ -519,6 +600,7 @@ async def llm_chat(req: ChatRequest, agent: str = Depends(require_auth)):
 
 @app.get("/llm/status")
 async def llm_status(agent: str = Depends(require_auth)) -> dict[str, Any]:
+    rate_limit(agent)
     key = os.getenv("GROQ_API_KEY")
     model_default = "llama-3.3-70b-versatile"
     try:
@@ -527,3 +609,24 @@ async def llm_status(agent: str = Depends(require_auth)) -> dict[str, Any]:
     except Exception:
         pass
     return {"configured": bool(key), "prefix": (key[:8] + '***') if key else None, "model_default": model_default}
+
+# ---------- Global Error Handlers ----------
+@app.exception_handler(HTTPException)
+async def http_exc_handler(request: Request, exc: HTTPException):  # type: ignore[override]
+    if isinstance(exc.detail, dict) and 'error' in exc.detail:
+        payload = exc.detail
+    else:
+        payload = {"error": {"code": "http_error", "message": str(exc.detail)}}
+    return JSONResponse(status_code=exc.status_code, content=payload)
+
+@app.exception_handler(RequestValidationError)
+async def validation_handler(request: Request, exc: RequestValidationError):  # type: ignore[override]
+    return JSONResponse(status_code=422, content={"error": {"code": "validation_error", "message": exc.errors()}})
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['Cache-Control'] = 'no-store'
+    return response

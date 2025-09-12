@@ -1,0 +1,15 @@
+# Copy / adjust servers.url when deploying
+openapi: 3.0.3
+info:
+  title: Version_7 API (Public)
+  version: 0.1.0
+servers:
+  - url: https://echo-realm.onrender.com
+components:
+  securitySchemes:
+    ApiKeyHeader:
+      type: apiKey
+      in: header
+      name: X-API-Key
+security:
+  - ApiKeyHeader: []
