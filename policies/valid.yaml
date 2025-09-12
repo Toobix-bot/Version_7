@@ -1,0 +1,16 @@
+# Example valid policy file
+rules:
+  - id: allow-plans-basic
+    description: Allow basic plan generation
+    match:
+      intents:
+        - ".*"
+    actions:
+      allow: true
+  - id: restrict-sensitive-paths
+    description: Forbid writes outside whitelisted dirs
+    match:
+      targets:
+        - "^((api|plans)/).*"
+    actions:
+      allow: true

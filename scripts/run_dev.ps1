@@ -3,7 +3,9 @@ Param(
     [int]$Port = 8000,
     [switch]$Reload,
     [string]$ApiKey = "test",
-    [string]$LogFile = "logs/app.log"
+    [string]$LogFile = "logs/app.log",
+    [switch]$Wait,
+    [switch]$Verbose
 )
 
 $ErrorActionPreference = 'Stop'
@@ -38,6 +40,22 @@ if ($Reload.IsPresent) { $reloadFlag = '--reload' }
 
 Write-Host ("Starte Server http://{0}:{1} (Reload={2}) LogFile={3}" -f $BindHost,$Port,$Reload.IsPresent,$LogFile)
 
-$cmd = ".venv/\Scripts\python -m uvicorn api.app:app --host $BindHost --port $Port $reloadFlag"
-Write-Host $cmd
-Invoke-Expression $cmd
+try {
+    $python = Join-Path $root '.venv/ScriptS/python.exe'
+    if (-not (Test-Path $python)) { $python = Join-Path $root '.venv/Scripts/python.exe' }
+    if (-not (Test-Path $python)) { throw "Python executable nicht gefunden unter .venv/Scripts" }
+
+    $argsList = @('-m','uvicorn','api.app:app','--host', $BindHost,'--port', $Port)
+    if ($Reload.IsPresent) { $argsList += '--reload' }
+
+    if ($Verbose) {
+        Write-Host "Python: $python"
+        Write-Host ('Args : ' + ($argsList -join ' '))
+    }
+
+    & $python @argsList
+} catch {
+    Write-Host "[ERROR] $_" -ForegroundColor Red
+} finally {
+    if ($Wait) { Write-Host 'Beenden mit Enter...' ; [void][System.Console]::ReadLine() }
+}

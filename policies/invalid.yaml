@@ -1,0 +1,3 @@
+# Intentionally invalid policy (missing required structure)
+not_rules:
+  - bogus: true

@@ -11,7 +11,7 @@ import httpx  # noqa: E402
 import pytest  # noqa: E402
 from api.app import app  # noqa: E402
 
-os.environ.setdefault("API_TOKEN", "test-token")
+os.environ.setdefault("API_TOKENS", "test-token")
 
 @pytest.fixture(scope="session")
 def anyio_backend():

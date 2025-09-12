@@ -40,8 +40,9 @@ logger.propagate = False
 APP_START = time.time()
 SEED = int(os.getenv("DETERMINISTIC_SEED", "42"))
 random.seed(SEED)
-API_TOKEN = os.getenv("API_TOKEN", "changeme-dev-token")
-API_TOKENS = {t.strip() for t in os.getenv("API_TOKENS", API_TOKEN).split(",") if t.strip()}
+# Consolidated token source: API_TOKENS (comma-separated). Fallback to single legacy API_TOKEN if present.
+_legacy_single = os.getenv("API_TOKEN", "")
+API_TOKENS = {t.strip() for t in os.getenv("API_TOKENS", _legacy_single or "changeme-dev-token").split(",") if t.strip()}
 KILL_SWITCH = os.getenv("KILL_SWITCH", "off")
 DB_PATH = os.getenv("DB_PATH", "agent.db")
 POLICY_DIR = os.getenv("POLICY_DIR", "policies")

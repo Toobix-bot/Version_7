@@ -41,7 +41,7 @@ Invalid policy reload returns 422 with structured errors.
 
 ## Development
 1. Install deps: `pip install -r requirements.txt`
-2. Copy `.env.example` -> `.env` and set `API_TOKEN`, `GROQ_API_KEY` etc.
+2. Copy `.env.example` -> `.env` and set `API_TOKENS`, `GROQ_API_KEY` etc.
 3. Run: `uvicorn api.app:app --reload`
 4. Visit `/docs` for OpenAPI with security schemes.
 
@@ -78,9 +78,31 @@ Omit `-Reload` for production-like run.
 Plans produce JSON artifacts in `plans/` only (PR-only workflow), snapshot script for git tag backups.
 
 ## Testing
+**Setup**
 - Async tests use `httpx.ASGITransport` (see `tests/conftest.py`).
 - Run: `pytest -q`
-- Write endpoints require `X-API-Key`; tests set `API_TOKENS=test`/`X-API-Key: test`.
+- Provide a token in env: `API_TOKENS=test-token` (tests also auto-add `test` & `test-token`).
+
+**Auth Expectations**
+- Missing or invalid key: 401
+- Valid key in header `X-API-Key`: success
+
+**Policy Reload Examples**
+Reload with valid file:
+```
+curl -X POST http://127.0.0.1:8000/policy/reload \
+	-H "X-API-Key: test" \
+	-H "Content-Type: application/json" \
+	-d '{"path":"policies/valid.yaml"}'
+```
+Reload with invalid file (expect 422):
+```
+curl -X POST http://127.0.0.1:8000/policy/reload \
+	-H "X-API-Key: test" \
+	-H "Content-Type: application/json" \
+	-d '{"path":"policies/invalid.yaml"}'
+```
+The error payload lists schema/structure issues.
 
 ## Logging
 - Set `LOG_FILE` (default `logs/app.log`) and optional `LOG_LEVEL` (INFO, DEBUG, ...).
