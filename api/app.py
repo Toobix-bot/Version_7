@@ -14,6 +14,7 @@ from functools import wraps
 from typing import Any, AsyncGenerator, Dict, Callable, Awaitable, TypeVar, Coroutine
 
 from fastapi import FastAPI, Depends, HTTPException, status, Request, Header, Body, Query
+from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, PlainTextResponse, RedirectResponse
 from fastapi.security import APIKeyHeader, HTTPBearer, HTTPAuthorizationCredentials
@@ -71,19 +72,43 @@ if os.getenv("ALLOW_TEST_TOKENS", "1") == "1":  # safe in dev; disable in prod v
 
 app = FastAPI(title="Life-Agent Dev Environment", version="0.1.0")
 
-# Ensure OpenAPI security scheme visible early
-def _inject_openapi_security():
-    original = app.openapi
-    def custom_openapi():  # type: ignore
-        schema = original()
-        comps = schema.setdefault('components', {}).setdefault('securitySchemes', {})
-        if 'ApiKeyHeader' not in comps:
-            comps['ApiKeyHeader'] = {"type": "apiKey", "in": "header", "name": "X-API-Key"}
-        if 'security' not in schema:
-            schema['security'] = [{"ApiKeyHeader": []}]
-        return schema
-    app.openapi = custom_openapi  # type: ignore
-_inject_openapi_security()
+# Custom OpenAPI builder: adds servers, security scheme, content-type fixes
+def custom_openapi():  # type: ignore
+    if getattr(app, 'openapi_schema', None):  # cached
+        return app.openapi_schema  # type: ignore[attr-defined]
+    schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        routes=app.routes,
+    )
+    # Servers (prefer env override)
+    public_url = os.getenv("PUBLIC_SERVER_URL", "https://version-7.onrender.com")
+    schema["servers"] = [{"url": public_url, "description": "Public server"}]
+    # Security scheme (global API Key)
+    comps = schema.setdefault('components', {}).setdefault('securitySchemes', {})
+    if 'ApiKeyHeader' not in comps:
+        comps['ApiKeyHeader'] = {"type": "apiKey", "in": "header", "name": "X-API-Key"}
+    schema['security'] = [{"ApiKeyHeader": []}]
+    # Content-type corrections for streaming & metrics
+    paths = schema.get('paths', {})
+    if '/events' in paths and 'get' in paths['/events']:
+        try:
+            paths['/events']['get']['responses']['200']['content'] = {
+                'text/event-stream': { 'schema': { 'type': 'string', 'description': 'SSE stream' } }
+            }
+        except Exception:
+            pass
+    if '/metrics' in paths and 'get' in paths['/metrics']:
+        try:
+            paths['/metrics']['get']['responses']['200']['content'] = {
+                'text/plain': { 'schema': { 'type': 'string', 'description': 'Prometheus exposition format' } }
+            }
+        except Exception:
+            pass
+    app.openapi_schema = schema  # cache
+    return schema
+
+app.openapi = custom_openapi  # type: ignore
 
 # --- CORS (restrict to required origins) ---
 ALLOWED_ORIGINS = [
