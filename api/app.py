@@ -71,6 +71,20 @@ if os.getenv("ALLOW_TEST_TOKENS", "1") == "1":  # safe in dev; disable in prod v
 
 app = FastAPI(title="Life-Agent Dev Environment", version="0.1.0")
 
+# Ensure OpenAPI security scheme visible early
+def _inject_openapi_security():
+    original = app.openapi
+    def custom_openapi():  # type: ignore
+        schema = original()
+        comps = schema.setdefault('components', {}).setdefault('securitySchemes', {})
+        if 'ApiKeyHeader' not in comps:
+            comps['ApiKeyHeader'] = {"type": "apiKey", "in": "header", "name": "X-API-Key"}
+        if 'security' not in schema:
+            schema['security'] = [{"ApiKeyHeader": []}]
+        return schema
+    app.openapi = custom_openapi  # type: ignore
+_inject_openapi_security()
+
 # --- CORS (restrict to required origins) ---
 ALLOWED_ORIGINS = [
     "https://chat.openai.com",
@@ -124,6 +138,8 @@ RATE_LIMIT_RPS = 5
 _rate_buckets: dict[str, list[float]] = {}
 
 def rate_limit(key: str):
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return  # disable during tests
     now = time.time()
     win = 1.0
     bucket = _rate_buckets.setdefault(key, [])

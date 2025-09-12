@@ -1,106 +1,482 @@
-openapi: 3.0.3
+openapi: 3.1.0
 info:
-  title: Version_7 API
+  title: Life-Agent Dev Environment
   version: 0.1.0
-  description: Basic game/agent API with turn, state, plan, llm, events.
-servers:
-  - url: https://echo-realm.onrender.com
-    description: Render production
+paths:
+  /act:
+    post:
+      summary: Act
+      operationId: act_act_post
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                title: Response Act Act Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /turn:
+    post:
+      summary: Turn
+      operationId: turn_turn_post
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TurnRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                title: Response Turn Turn Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /state:
+    get:
+      summary: Get State
+      operationId: get_state_state_get
+      parameters:
+      - name: agent_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Agent Id
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                title: Response Get State State Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /meta:
+    get:
+      summary: Get Meta
+      operationId: get_meta_meta_get
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                title: Response Get Meta Meta Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /healthz:
+    get:
+      summary: Healthz
+      operationId: healthz_healthz_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties:
+                  type: string
+                type: object
+                title: Response Healthz Healthz Get
+  /events:
+    get:
+      summary: Events Stream
+      operationId: events_stream_events_get
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /metrics:
+    get:
+      summary: Metrics
+      operationId: metrics_metrics_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+  /policy/reload:
+    post:
+      summary: Policy Reload
+      operationId: policy_reload_policy_reload_post
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      requestBody:
+        content:
+          application/json:
+            schema:
+              anyOf:
+              - type: string
+              - type: 'null'
+              title: Path
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                title: Response Policy Reload Policy Reload Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /plan:
+    post:
+      summary: Plan
+      operationId: plan_plan_post
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlanRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                title: Response Plan Plan Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /:
+    get:
+      summary: Root
+      operationId: root__get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+  /llm/chat:
+    post:
+      summary: Llm Chat
+      operationId: llm_chat_llm_chat_post
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /llm/status:
+    get:
+      summary: Llm Status
+      operationId: llm_status_llm_status_get
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                title: Response Llm Status Llm Status Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
 components:
+  schemas:
+    ActRequest:
+      properties:
+        agent_id:
+          type: string
+          title: Agent Id
+        action:
+          type: string
+          title: Action
+        payload:
+          anyOf:
+          - type: object
+          - type: 'null'
+          title: Payload
+      type: object
+      required:
+      - agent_id
+      - action
+      title: ActRequest
+    ChatMessage:
+      properties:
+        role:
+          type: string
+          title: Role
+        content:
+          type: string
+          title: Content
+      type: object
+      required:
+      - role
+      - content
+      title: ChatMessage
+    ChatRequest:
+      properties:
+        messages:
+          items:
+            $ref: '#/components/schemas/ChatMessage'
+          type: array
+          title: Messages
+        model:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Model
+        temperature:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Temperature
+        max_tokens:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Max Tokens
+      type: object
+      required:
+      - messages
+      title: ChatRequest
+    ChatResponse:
+      properties:
+        model:
+          type: string
+          title: Model
+        content:
+          type: string
+          title: Content
+        usage:
+          anyOf:
+          - type: object
+          - type: 'null'
+          title: Usage
+      type: object
+      required:
+      - model
+      - content
+      title: ChatResponse
+    HTTPValidationError:
+      properties:
+        detail:
+          items:
+            $ref: '#/components/schemas/ValidationError'
+          type: array
+          title: Detail
+      type: object
+      title: HTTPValidationError
+    PlanRequest:
+      properties:
+        description:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Description
+        target_files:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: Target Files
+        intent:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Intent
+        context:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Context
+        target_paths:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: Target Paths
+      type: object
+      title: PlanRequest
+    TurnRequest:
+      properties:
+        agent_id:
+          type: string
+          title: Agent Id
+        input:
+          type: string
+          title: Input
+      type: object
+      required:
+      - agent_id
+      - input
+      title: TurnRequest
+    ValidationError:
+      properties:
+        loc:
+          items:
+            anyOf:
+            - type: string
+            - type: integer
+          type: array
+          title: Location
+        msg:
+          type: string
+          title: Message
+        type:
+          type: string
+          title: Error Type
+      type: object
+      required:
+      - loc
+      - msg
+      - type
+      title: ValidationError
   securitySchemes:
     ApiKeyHeader:
       type: apiKey
       in: header
       name: X-API-Key
+servers:
+- url: https://echo-realm.onrender.com
+  description: Public server
 security:
-  - ApiKeyHeader: []
-paths:
-  /healthz:
-    get:
-      summary: Health probe
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-  /meta:
-    get:
-      summary: Meta info
-      responses:
-        '200':
-          description: Meta
-  /state:
-    get:
-      summary: Get state
-      parameters:
-        - name: agent_id
-          in: query
-          schema:
-            type: string
-      responses:
-        '200':
-          description: State
-  /turn:
-    post:
-      summary: Process turn
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                agent_id:
-                  type: string
-                input:
-                  type: string
-      responses:
-        '200':
-          description: Turn result
-  /act:
-    post:
-      summary: Perform act
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                agent_id:
-                  type: string
-                action:
-                  type: string
-      responses:
-        '200':
-          description: Act result
-  /plan:
-    post:
-      summary: Create plan
-      responses:
-        '200':
-          description: Plan created
-  /llm/chat:
-    post:
-      summary: LLM chat
-      responses:
-        '200':
-          description: Chat response
-  /llm/status:
-    get:
-      summary: LLM status
-      responses:
-        '200':
-          description: Status
-  /events:
-    get:
-      summary: Server-Sent Events stream
-      description: text/event-stream
-      responses:
-        '200':
-          description: Stream
+- ApiKeyHeader: []
