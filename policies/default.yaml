@@ -1,0 +1,11 @@
+version: 1
+rules:
+  - id: pr_only
+    description: All plan applications must result in a PR artifact, not direct writes.
+    enforce: true
+  - id: deny_dangerous_paths
+    description: Prevent modifications outside whitelisted directories.
+    paths_deny:
+      - ../
+      - /etc
+      - /root
