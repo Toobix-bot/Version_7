@@ -1,4 +1,4 @@
-openapi: 3.1.0
+openapi: 3.0.3
 info:
   title: Life-Agent Dev Environment
   version: 0.1.0
@@ -7,15 +7,6 @@ paths:
     post:
       summary: Act
       operationId: act_act_post
-      parameters:
-      - name: X-API-Key
-        in: header
-        required: false
-        schema:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: X-Api-Key
       requestBody:
         required: true
         content:
@@ -40,15 +31,6 @@ paths:
     post:
       summary: Turn
       operationId: turn_turn_post
-      parameters:
-      - name: X-API-Key
-        in: header
-        required: false
-        schema:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: X-Api-Key
       requestBody:
         required: true
         content:
@@ -78,18 +60,8 @@ paths:
         in: query
         required: false
         schema:
-          anyOf:
-          - type: string
-          - type: 'null'
+          type: string
           title: Agent Id
-      - name: X-API-Key
-        in: header
-        required: false
-        schema:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: X-Api-Key
       responses:
         '200':
           description: Successful Response
@@ -108,15 +80,6 @@ paths:
     get:
       summary: Get Meta
       operationId: get_meta_meta_get
-      parameters:
-      - name: X-API-Key
-        in: header
-        required: false
-        schema:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: X-Api-Key
       responses:
         '200':
           description: Successful Response
@@ -149,50 +112,29 @@ paths:
     get:
       summary: Events Stream
       operationId: events_stream_events_get
-      parameters:
-      - name: X-API-Key
-        in: header
-        required: false
-        schema:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: X-Api-Key
       responses:
         '200':
-          description: Successful Response
+          description: OK (Server-Sent Events)
           content:
-            application/json:
-              schema: {}
-        '422':
-          description: Validation Error
-          content:
-            application/json:
+            text/event-stream:
               schema:
-                $ref: '#/components/schemas/HTTPValidationError'
+                type: string
+                description: SSE stream of JSON event lines
   /metrics:
     get:
       summary: Metrics
       operationId: metrics_metrics_get
       responses:
         '200':
-          description: Successful Response
+          description: OK (Prometheus exposition format)
           content:
-            application/json:
-              schema: {}
+            text/plain:
+              schema:
+                type: string
   /policy/reload:
     post:
       summary: Policy Reload
       operationId: policy_reload_policy_reload_post
-      parameters:
-      - name: X-API-Key
-        in: header
-        required: false
-        schema:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: X-Api-Key
       requestBody:
         content:
           application/json:
@@ -219,15 +161,6 @@ paths:
     post:
       summary: Plan
       operationId: plan_plan_post
-      parameters:
-      - name: X-API-Key
-        in: header
-        required: false
-        schema:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: X-Api-Key
       requestBody:
         required: true
         content:
@@ -262,15 +195,6 @@ paths:
     post:
       summary: Llm Chat
       operationId: llm_chat_llm_chat_post
-      parameters:
-      - name: X-API-Key
-        in: header
-        required: false
-        schema:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: X-Api-Key
       requestBody:
         required: true
         content:
@@ -294,15 +218,6 @@ paths:
     get:
       summary: Llm Status
       operationId: llm_status_llm_status_get
-      parameters:
-      - name: X-API-Key
-        in: header
-        required: false
-        schema:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: X-Api-Key
       responses:
         '200':
           description: Successful Response
@@ -476,7 +391,7 @@ components:
       in: header
       name: X-API-Key
 servers:
-- url: https://echo-realm.onrender.com
+- url: https://version-7.onrender.com
   description: Public server
 security:
 - ApiKeyHeader: []

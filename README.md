@@ -121,3 +121,71 @@ python examples/llm_test.py
 ```
 It first hits `/llm/status`, then `/llm/chat` with a minimal prompt if configured.
 
+## Deployment (Docker + Render)
+
+1. Build locally:
+```
+docker build -t version7:local .
+docker run -e API_KEY=your_key -p 10000:10000 version7:local
+```
+2. Health check: `curl -s -H "X-API-Key: your_key" http://localhost:10000/healthz`
+3. Deploy to Render:
+	- New Web Service → Use repo → Docker detected.
+	- Set Environment Variable `API_KEY` (or allow generated in `render.yaml`).
+	- Confirm Health Check Path `/healthz`.
+4. After deploy, note public base URL (e.g. `https://echo-realm.onrender.com`).
+
+## Static OpenAPI for GitHub Pages
+
+The live interactive docs remain at `/docs`. A static spec lives at `docs/openapi.yaml` for GitHub Pages & GPT Actions.
+
+Regenerate (ensures routes/security up to date):
+```
+python ops/export_openapi.py  # uses PUBLIC_SERVER_URL env if set
+```
+Set `PUBLIC_SERVER_URL` before exporting to embed the final server URL.
+
+Enable Pages (GitHub → Settings → Pages): Branch `main`, folder `/docs`.
+
+Resulting URLs (example):
+- OpenAPI YAML: `https://toobix-bot.github.io/Version_7/openapi.yaml`
+- Landing: `https://toobix-bot.github.io/Version_7/`
+
+## Custom GPT (Actions) Integration
+
+When the API is public:
+1. Ensure `openapi.yaml` has correct `servers:` pointing to the deployed domain.
+2. In ChatGPT → Create GPT → Actions → Import from URL (Pages URL).
+3. Auth: API key in header → Name `X-API-Key`.
+4. Suggested instructions:
+	- "Wenn der Nutzer eine Spielaktion beschreibt → POST /turn"
+	- "Bei Statusfragen → GET /state"
+	- "Antworten sind knapp, immersiv; JSON-Felder in erzählenden Text wandeln"
+
+## Rate Limiting & Request IDs
+
+- Simple in-memory limit (5 req/s per agent) disabled under tests (`PYTEST_CURRENT_TEST`).
+- Each response carries `X-Request-Id` for correlation; logs are JSON lines with that ID.
+
+## Error Format
+All handled errors unify as:
+```
+{"error": {"code": "<machine_code>", "message": "<human text>"}}
+```
+
+## Security Hardening Notes
+- CORS restricted to explicit origins (extend via `ALLOWED_ORIGINS`).
+- API key required on all mutating endpoints (`/act`, `/turn`, `/plan`, `/policy/reload`, `/llm/*`).
+- Risk regex & whitelist gating mitigate prompt/file abuse.
+- Optional OPA gate (`opa_allow`) for external policy evaluation.
+
+## Maintenance Scripts
+- `ops/export_openapi.py` regenerates `docs/openapi.yaml` with merged security scheme.
+
+## Next Enhancements (Ideas)
+- Persisted rate limit (Redis) for multi-instance deploy.
+- JWT-based auth alternative.
+- Structured metrics label reduction for cardinality control.
+- Background task queue for heavier `/turn` logic.
+
+
