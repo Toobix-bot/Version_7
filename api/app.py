@@ -73,6 +73,15 @@ if os.getenv("ALLOW_TEST_TOKENS", "1") == "1":  # safe in dev; disable in prod v
 
 app = FastAPI(title="Life-Agent Dev Environment", version="0.1.0")
 
+# Persona presets (added after refactor to ensure constant exists for chat)
+PERSONA_PRESETS: dict[str, str] = {
+    "mentor": "Du bist ein geduldiger Mentor. Antworte klar, knapp und lehrreich.",
+    "auditor": "Du bist ein kritischer Auditor. Fokussiere Risiken, Lücken, Compliance.",
+    "architekt": "Du bist ein Software-Architekt. Entwirf klare modulare Strukturen.",
+    "erzähler": "Du bist ein Erzähler. Verwandle technische Ziele in eine kurze Story.",
+    "default": "Du bist ein hilfreicher Assistent für Entwicklungsaufgaben."
+}
+
 # Custom OpenAPI builder: adds servers, security scheme, content-type fixes, and schema hardening
 def custom_openapi():  # type: ignore
     if getattr(app, 'openapi_schema', None):  # cached
@@ -223,6 +232,9 @@ ENV_INFO_TOTAL = Counter("env_info_total", "Environment info requests", registry
 SUGGEST_GENERATED_TOTAL = Counter("suggestions_generated_total", "Suggestions generated", registry=REGISTRY)
 SUGGEST_REVIEW_TOTAL = Counter("suggestions_review_total", "Suggestion review actions", ["action"], registry=REGISTRY)
 SUGGEST_OPEN_GAUGE = Gauge("suggestions_open_total", "Open (draft/revised) suggestions", registry=REGISTRY)
+THOUGHT_GENERATED_TOTAL = Counter("thought_generated_total", "Generated background thoughts", registry=REGISTRY)
+THOUGHT_CATEGORY_TOTAL = Counter("thought_category_total", "Thoughts per category", ["category"], registry=REGISTRY)
+QUEST_COMPLETED_TOTAL = Counter("quest_completed_total", "Completed quests", registry=REGISTRY)
 
 RISK_PATTERNS = [r"\b(os\.system|subprocess\.)", r"\.\./", r"/etc/passwd", r"\b(?:ssh|https?|ftp)://", r"(?i)api[_-]?key", r"(?i)\b(token|secret)\b"]
 
@@ -276,11 +288,14 @@ class ChatRequest(BaseModel):
     model: str | None = None
     temperature: float | None = None
     max_tokens: int | None = None
+    persona: str | None = None  # NEW persona selector
+    agent_id: str | None = None  # multi-agent memory scope
 
 class ChatResponse(BaseModel):
     model: str
     content: str
     usage: dict[str, Any] | None = None
+    persona: str | None = None  # echo persona
 
 class EnvInfoResponse(BaseModel):
     version: str
@@ -308,6 +323,8 @@ class Suggestion(BaseModel):
     weaknesses: list[str] = []
     metrics_impact: dict[str, Any]
     version: str = "1"
+    tags: list[str] = []  # NEW for quests
+    impact: dict[str, Any] | None = None  # impact scoring (score, rationale, approved_at)
 
 class SuggestReviewRequest(BaseModel):
     id: str
@@ -337,6 +354,49 @@ class SuggestLLMRequest(BaseModel):
 class SuggestLLMResponse(BaseModel):
     suggestion: Suggestion
     refined: bool
+# Impact model
+class ImpactInfo(BaseModel):
+    id: str
+    score: float
+    rationale: str
+    approved_at: float
+# Thought models
+class Thought(BaseModel):
+    id: str
+    ts: float
+    text: str
+    kind: str = "thought"
+    meta: dict[str, Any] | None = None
+    category: str | None = None
+class ThoughtStreamResponse(BaseModel):
+    items: list[Thought]
+    total: int
+
+# ---- Memory & Quest Models ----
+class MemoryItem(BaseModel):
+    id: str
+    ts: float
+    role: str
+    content: str
+    persona: str | None = None
+    agent_id: str | None = None
+
+class MemoryList(BaseModel):
+    items: list[MemoryItem]
+
+class QuestGenerateRequest(BaseModel):
+    theme: str | None = None
+    difficulty: str | None = None  # easy|normal|hard
+
+class QuestItem(BaseModel):
+    id: str
+    goal: str
+    status: str
+    created_at: float
+    difficulty: str | None = None
+
+class QuestListResponse(BaseModel):
+    items: list[QuestItem]
 
 # ---------------- Database ----------------
 def init_db() -> None:
@@ -382,6 +442,13 @@ def init_db() -> None:
             latency_ms REAL,
             meta TEXT
         );
+        CREATE TABLE IF NOT EXISTS thoughts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts REAL NOT NULL,
+            text TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            meta TEXT
+        );
         """
     )
     db_conn.commit()
@@ -419,6 +486,11 @@ async def on_startup() -> None:  # pragma: no cover - simple init
     init_db()
     load_policies()
     logger.info("startup complete policies=%d", len(policies.get('rules', [])))
+    if os.getenv("THOUGHT_STREAM_ENABLE", "1") == "1":
+        try:
+            asyncio.create_task(_thought_loop())
+        except Exception:
+            logger.warning("failed to start thought loop")
 
 # ---------------- Security ------------------
 API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -758,23 +830,50 @@ async def root() -> RedirectResponse:
 @app.post("/llm/chat", response_model=ChatResponse)
 async def llm_chat(req: ChatRequest, agent: str = Depends(require_auth)):
     rate_limit(agent)
+    persona = (req.persona or "default").lower()
+    pref = PERSONA_PRESETS.get(persona)
+    if pref:
+        req.messages = [ChatMessage(role="system", content=pref)] + req.messages
+    # memory capture
+    try:
+        last_user = next((m.content for m in reversed(req.messages) if m.role == 'user'), None)
+        if last_user:
+            _store_memory('user', last_user, persona, req.agent_id)
+    except Exception:
+        pass
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         raise HTTPException(status_code=503, detail="GROQ_API_KEY not configured")
-    start_time = time.time()
     try:
-        from groq import Groq
+        from groq import Groq  # type: ignore
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"Groq SDK import failed: {e}")
-    client = Groq(api_key=api_key)
-    model = req.model or (current_policy.llm.model if current_policy else "llama-3.3-70b-versatile")
-    temperature = req.temperature if req.temperature is not None else (current_policy.llm.temperature if current_policy else 0.0)
-    max_tokens = req.max_tokens if req.max_tokens is not None else (current_policy.llm.max_tokens if current_policy else 512)
+    # model params
+    base_model = "llama-3.3-70b-versatile"
+    try:
+        if current_policy and getattr(current_policy, 'llm', None) and getattr(current_policy.llm, 'model', None):
+            base_model = current_policy.llm.model  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    model = req.model or base_model
+    temperature = req.temperature if req.temperature is not None else 0.0
+    try:
+        if current_policy and getattr(current_policy, 'llm', None) and getattr(current_policy.llm, 'temperature', None) is not None and req.temperature is None:
+            temperature = current_policy.llm.temperature  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    max_tokens = req.max_tokens if req.max_tokens is not None else 512
+    try:
+        if current_policy and getattr(current_policy, 'llm', None) and getattr(current_policy.llm, 'max_tokens', None) and req.max_tokens is None:
+            max_tokens = current_policy.llm.max_tokens  # type: ignore[attr-defined]
+    except Exception:
+        pass
     if max_tokens > 4096:
         raise HTTPException(status_code=400, detail="max_tokens too large")
-    joined = "\n".join(m.content for m in req.messages)
-    risk_gate(joined)
+    risk_gate("\n".join(m.content for m in req.messages))
     LLM_REQUESTS_TOTAL.labels(model=model).inc()
+    client = Groq(api_key=api_key)
+    start = time.time()
     try:
         completion = client.chat.completions.create(
             model=model,
@@ -782,58 +881,54 @@ async def llm_chat(req: ChatRequest, agent: str = Depends(require_auth)):
             temperature=temperature,
             max_tokens=max_tokens,
         )
-        choice = ''
-        if completion.choices:
-            first_msg = completion.choices[0].message
-            try:
-                if hasattr(first_msg, 'content'):
-                    choice = str(getattr(first_msg, 'content') or '')
-                elif isinstance(first_msg, dict):
-                    choice = str(first_msg.get('content') or '')
-            except Exception:
-                choice = ''
-        raw_usage = getattr(completion, 'usage', None)
-        usage_dict = None
-        if raw_usage:
+        out_text = ''
+        try:
+            if getattr(completion, 'choices', None):
+                first = completion.choices[0].message  # type: ignore[index]
+                if hasattr(first, 'content'):
+                    out_text = str(getattr(first, 'content') or '')
+                elif isinstance(first, dict):
+                    out_text = str(first.get('content') or '')
+        except Exception:
+            out_text = ''
+        usage = getattr(completion, 'usage', None)
+        usage_dict: dict[str, Any] | None = None
+        if usage:
             try:
                 usage_dict = {
-                    'prompt_tokens': getattr(raw_usage, 'prompt_tokens', None) or getattr(raw_usage, 'prompt', None) or (raw_usage.get('prompt_tokens') if isinstance(raw_usage, dict) else None),
-                    'completion_tokens': getattr(raw_usage, 'completion_tokens', None) or (raw_usage.get('completion_tokens') if isinstance(raw_usage, dict) else None),
-                    'total_tokens': getattr(raw_usage, 'total_tokens', None) or (raw_usage.get('total_tokens') if isinstance(raw_usage, dict) else None),
+                    'prompt_tokens': getattr(usage, 'prompt_tokens', None) or (usage.get('prompt_tokens') if isinstance(usage, dict) else None),
+                    'completion_tokens': getattr(usage, 'completion_tokens', None) or (usage.get('completion_tokens') if isinstance(usage, dict) else None),
+                    'total_tokens': getattr(usage, 'total_tokens', None) or (usage.get('total_tokens') if isinstance(usage, dict) else None),
                 }
             except Exception:
-                try:
-                    usage_dict = dict(raw_usage)  # type: ignore[arg-type]
-                except Exception:
-                    usage_dict = None
+                usage_dict = None
         if usage_dict:
             if usage_dict.get('prompt_tokens') is not None:
-                LLM_TOKENS_TOTAL.labels(type="prompt").inc(usage_dict['prompt_tokens'])
+                LLM_TOKENS_TOTAL.labels(type="prompt").inc(int(usage_dict['prompt_tokens']))
             if usage_dict.get('completion_tokens') is not None:
-                LLM_TOKENS_TOTAL.labels(type="completion").inc(usage_dict['completion_tokens'])
+                LLM_TOKENS_TOTAL.labels(type="completion").inc(int(usage_dict['completion_tokens']))
             if usage_dict.get('total_tokens') is not None:
-                LLM_TOKENS_TOTAL.labels(type="total").inc(usage_dict['total_tokens'])
-        latency_ms = (time.time() - start_time) * 1000.0
-        if db_conn and usage_dict:
-            try:
-                db_conn.execute(
-                    "INSERT INTO llm_usage(ts, model, prompt_tokens, completion_tokens, total_tokens, latency_ms, meta) VALUES (?,?,?,?,?,?,?)",
-                    (
-                        time.time(),
-                        model,
-                        usage_dict.get('prompt_tokens'),
-                        usage_dict.get('completion_tokens'),
-                        usage_dict.get('total_tokens'),
-                        latency_ms,
-                        json.dumps({}),
+                LLM_TOKENS_TOTAL.labels(type="total").inc(int(usage_dict['total_tokens']))
+            if db_conn:
+                try:
+                    db_conn.execute(
+                        "INSERT INTO llm_usage(ts, model, prompt_tokens, completion_tokens, total_tokens, latency_ms, meta) VALUES (?,?,?,?,?,?,?)",
+                        (
+                            time.time(),
+                            model,
+                            usage_dict.get('prompt_tokens'),
+                            usage_dict.get('completion_tokens'),
+                            usage_dict.get('total_tokens'),
+                            (time.time() - start) * 1000.0,
+                            json.dumps({}),
+                        )
                     )
-                )
-                db_conn.commit()
-            except Exception:
-                pass
-        await emit_event("llm.chat", {"model": model, "tokens": (usage_dict or {}).get('total_tokens')})
-        logger.info("llm chat model=%s total_tokens=%s", model, (usage_dict or {}).get('total_tokens'))
-        return ChatResponse(model=str(model), content=choice, usage=usage_dict)
+                    db_conn.commit()
+                except Exception:
+                    pass
+        await emit_event("llm.chat", {"model": model, "tokens": (usage_dict or {}).get('total_tokens'), "persona": persona, "agent_id": req.agent_id})
+        _store_memory('assistant', out_text, persona, req.agent_id)
+        return ChatResponse(model=model, content=out_text, usage=usage_dict, persona=persona)
     except HTTPException:
         raise
     except Exception as e:  # noqa: BLE001
@@ -857,6 +952,26 @@ idle_state: dict[str, Any] = {
     "resources": 0,
     "rules_version": 1,
 }
+
+# ---------------- In-Memory Conversational Memory (multi-agent) -----------------
+MEMORY_LIMIT = int(os.getenv("MEMORY_LIMIT", "200"))
+_memory_buffer: list[MemoryItem] = []
+
+def _store_memory(role: str, content: str, persona: str | None = None, agent_id: str | None = None) -> None:
+    try:
+        item = MemoryItem(id=f"mem_{int(time.time()*1000)}_{random.randint(100,999)}", ts=time.time(), role=role, content=content[:4000], persona=persona, agent_id=agent_id)
+        _memory_buffer.append(item)
+        if len(_memory_buffer) > MEMORY_LIMIT:
+            del _memory_buffer[0:len(_memory_buffer)-MEMORY_LIMIT]
+    except Exception:
+        pass
+
+@app.get("/memory/list", response_model=MemoryList)
+async def memory_list(limit: int = 50, persona: str | None = None, agent_id: str | None = None, agent: str = Depends(require_auth)) -> MemoryList:  # type: ignore[override]
+    rate_limit(agent)
+    view = [m for m in _memory_buffer if (persona is None or m.persona==persona) and (agent_id is None or m.agent_id==agent_id)]
+    items = list(view)[-limit:][::-1]
+    return MemoryList(items=items)
 
 @app.get("/game/idle/state")
 async def idle_get_state(agent: str = Depends(require_auth)) -> dict[str, Any]:
@@ -1043,6 +1158,18 @@ async def suggest_review_post(req: SuggestReviewRequest, agent: str = Depends(re
     if req.approve:
         if s.status != "approved":
             s.status = "approved"
+            # attach impact scoring if not already present
+            if not s.impact:
+                # simple heuristic scoring: count of recommended steps & weaknesses
+                base = len(s.recommended_steps)
+                penalty = len(s.weaknesses or []) * 0.1
+                score = max(0.1, min(1.0, (base / 10.0) - penalty + 0.3))
+                rationale = f"Heuristisch: {base} Schritte, {len(s.weaknesses or [])} Schwächen, Basisgewichtung mit Startoffset."
+                s.impact = {"score": round(score,2), "rationale": rationale, "approved_at": time.time()}
+            # quest completion detection: any suggestion with tag starting 'quest:'
+            if any(t.startswith("quest:") for t in s.tags):
+                await emit_event("quest.completed", {"suggestion": s.id, "tags": s.tags})
+                QUEST_COMPLETED_TOTAL.inc()
             _save_suggestion(s)
             await emit_event("suggest.approved", {"id": s.id})
             SUGGEST_REVIEW_TOTAL.labels(action="approve").inc()
@@ -1069,6 +1196,16 @@ async def suggest_review_post(req: SuggestReviewRequest, agent: str = Depends(re
     update_open_gauge()
     return SuggestReviewResponse(suggestion=s, revised=revised)
 
+@app.get("/suggest/impact", response_model=ImpactInfo)
+async def suggest_impact(id: str, agent: str = Depends(require_auth)) -> ImpactInfo:  # type: ignore[override]
+    rate_limit(agent)
+    s = _load_suggestion(id)
+    if not s:
+        raise HTTPException(status_code=404, detail={"code": "suggest_not_found"})
+    if not s.impact:
+        raise HTTPException(status_code=404, detail={"code": "impact_not_found"})
+    return ImpactInfo(id=s.id, score=float(s.impact.get("score",0.0)), rationale=str(s.impact.get("rationale","")), approved_at=float(s.impact.get("approved_at",0.0)))
+
 @app.get("/suggest/list", response_model=SuggestListResponse)
 async def suggest_list(limit: int = 50, full: bool = False, agent: str = Depends(require_auth)) -> SuggestListResponse:  # type: ignore[override]
     rate_limit(agent)
@@ -1080,6 +1217,28 @@ async def suggest_list(limit: int = 50, full: bool = False, agent: str = Depends
     for s in items[:limit]:
         view.append(SuggestListItem(id=s.id, status=s.status, goal=s.goal, created_at=s.created_at, weaknesses=(s.weaknesses if full else None)))
     return SuggestListResponse(total=total, open=open_cnt, items=view)
+
+# Quest listing derived from suggestions tagged with quest:
+@app.get("/quest/list", response_model=QuestListResponse)
+async def quest_list(agent: str = Depends(require_auth)) -> QuestListResponse:  # type: ignore[override]
+    rate_limit(agent)
+    items = []
+    for s in _iter_suggestions():
+        qtags = [t for t in s.tags if t.startswith("quest:")]
+        if not qtags:
+            continue
+        status = "done" if s.status == "approved" else ("revised" if s.status == "revised" else "pending")
+        diff = None
+        # optional difficulty tag quest:hard etc.
+        for t in qtags:
+            if ":" in t:
+                parts = t.split(":",2)
+                if len(parts)==3:
+                    diff = parts[2]
+        items.append(QuestItem(id=s.id, goal=s.goal, status=status, created_at=s.created_at, difficulty=diff))
+    # sort newest first
+    items.sort(key=lambda x: x.created_at, reverse=True)
+    return QuestListResponse(items=items)
 
 @app.post("/suggest/llm", response_model=SuggestLLMResponse)
 async def suggest_llm(req: SuggestLLMRequest, agent: str = Depends(require_auth)) -> SuggestLLMResponse:  # type: ignore[override]
@@ -1141,6 +1300,76 @@ async def suggest_llm(req: SuggestLLMRequest, agent: str = Depends(require_auth)
         update_open_gauge()
         await emit_event("suggest.refined", {"id": s.id})
     return SuggestLLMResponse(suggestion=s, refined=refined)
+
+# Thought Stream Feature
+THOUGHT_INTERVAL_MIN = float(os.getenv("THOUGHT_STREAM_INTERVAL_MIN", "5"))
+THOUGHT_INTERVAL_MAX = float(os.getenv("THOUGHT_STREAM_INTERVAL_MAX", "10"))
+THOUGHT_LIMIT = int(os.getenv("THOUGHT_STREAM_LIMIT", "200"))
+_recent_thoughts: list[Thought] = []
+async def _generate_thought() -> Thought:
+    now = time.time()
+    open_sugs = 0
+    try:
+        open_sugs = int(SUGGEST_OPEN_GAUGE._value.get())  # type: ignore
+    except Exception:
+        pass
+    idle_tick = 0
+    try: idle_tick = int(idle_state.get('tick',0))
+    except Exception: pass
+    theme = random.choice(["reflexion","idee","notiz","vision","risiko","beobachtung"])
+    fragments = [f"open_suggestions={open_sugs}", f"idle_tick={idle_tick}"]
+    if open_sugs>5: fragments.append("fokus: approvals beschleunigen")
+    elif open_sugs==0: fragments.append("fenster für neue initiative")
+    if idle_tick and idle_tick % 7 == 0: fragments.append("idle schwellwert erreicht")
+    text = f"[{theme}] " + "; ".join(fragments)
+    # simple keyword category mapping
+    cat = "neutral"
+    lower = text.lower()
+    if "risiko" in lower: cat = "risk"
+    elif "initiative" in lower or "vision" in lower: cat = "opportunity"
+    elif "approval" in lower or "approvals" in lower or "fokus" in lower: cat = "action"
+    elif "idle" in lower: cat = "system"
+    t = Thought(id=f"th_{int(now)}_{random.randint(100,999)}", ts=now, text=text, meta={"open":open_sugs,"idle":idle_tick}, category=cat)
+    return t
+async def _thought_loop():
+    while True:
+        try:
+            t = await _generate_thought()
+            _recent_thoughts.append(t)
+            if len(_recent_thoughts) > THOUGHT_LIMIT:
+                _recent_thoughts[:] = _recent_thoughts[-THOUGHT_LIMIT:]
+            if db_conn:
+                try:
+                    db_conn.execute("INSERT INTO thoughts(ts, text, kind, meta) VALUES (?,?,?,?)", (t.ts, t.text, t.kind, json.dumps(t.meta or {})))
+                    db_conn.commit()
+                except Exception: pass
+            THOUGHT_GENERATED_TOTAL.inc()
+            THOUGHT_CATEGORY_TOTAL.labels(category=t.category or "unknown").inc()
+            await emit_event("thought.stream", {"id": t.id, "text": t.text, "category": t.category})
+        except Exception as e:
+            logger.warning("thought loop error: %s", e)
+        await asyncio.sleep(random.uniform(THOUGHT_INTERVAL_MIN, THOUGHT_INTERVAL_MAX))
+@app.get("/thought/stream", response_model=ThoughtStreamResponse)
+async def thought_stream(limit: int = 50, agent: str = Depends(require_auth)) -> ThoughtStreamResponse:  # type: ignore
+    rate_limit(agent)
+    items = list(_recent_thoughts)[-limit:]
+    return ThoughtStreamResponse(items=items[::-1], total=len(_recent_thoughts))
+@app.post("/thought/generate", response_model=Thought)
+async def thought_generate(agent: str = Depends(require_auth)) -> Thought:  # type: ignore
+    rate_limit(agent)
+    t = await _generate_thought()
+    _recent_thoughts.append(t)
+    if len(_recent_thoughts) > THOUGHT_LIMIT:
+        _recent_thoughts[:] = _recent_thoughts[-THOUGHT_LIMIT:]
+    if db_conn:
+        try:
+            db_conn.execute("INSERT INTO thoughts(ts, text, kind, meta) VALUES (?,?,?,?)", (t.ts, t.text, t.kind, json.dumps(t.meta or {})))
+            db_conn.commit()
+        except Exception: pass
+    THOUGHT_GENERATED_TOTAL.inc()
+    THOUGHT_CATEGORY_TOTAL.labels(category=t.category or "unknown").inc()
+    await emit_event("thought.stream", {"id": t.id, "text": t.text, "category": t.category, "manual": True})
+    return t
 
 # ---------- Global Error Handlers ----------
 @app.exception_handler(HTTPException)

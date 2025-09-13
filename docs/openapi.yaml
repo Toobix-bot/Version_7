@@ -397,6 +397,55 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /memory/list:
+    get:
+      summary: Memory List
+      operationId: memory_list_memory_list_get
+      parameters:
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 50
+          title: Limit
+      - name: persona
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Persona
+      - name: agent_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Agent Id
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryList'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /game/idle/state:
     get:
       summary: Idle Get State
@@ -574,6 +623,38 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /suggest/impact:
+    get:
+      summary: Suggest Impact
+      operationId: suggest_impact_suggest_impact_get
+      parameters:
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          title: Id
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImpactInfo'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /suggest/list:
     get:
       summary: Suggest List
@@ -614,6 +695,32 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /quest/list:
+    get:
+      summary: Quest List
+      operationId: quest_list_quest_list_get
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuestListResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /suggest/llm:
     post:
       summary: Suggest Llm
@@ -640,6 +747,65 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SuggestLLMResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /thought/stream:
+    get:
+      summary: Thought Stream
+      operationId: thought_stream_thought_stream_get
+      parameters:
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 50
+          title: Limit
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ThoughtStreamResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /thought/generate:
+    post:
+      summary: Thought Generate
+      operationId: thought_generate_thought_generate_post
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Thought'
         '422':
           description: Validation Error
           content:
@@ -701,6 +867,16 @@ components:
           - type: integer
           - type: 'null'
           title: Max Tokens
+        persona:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Persona
+        agent_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Agent Id
       type: object
       required:
       - messages
@@ -718,6 +894,11 @@ components:
           - type: object
           - type: 'null'
           title: Usage
+        persona:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Persona
       type: object
       required:
       - model
@@ -763,6 +944,69 @@ components:
           title: Detail
       type: object
       title: HTTPValidationError
+    ImpactInfo:
+      properties:
+        id:
+          type: string
+          title: Id
+        score:
+          type: number
+          title: Score
+        rationale:
+          type: string
+          title: Rationale
+        approved_at:
+          type: number
+          title: Approved At
+      type: object
+      required:
+      - id
+      - score
+      - rationale
+      - approved_at
+      title: ImpactInfo
+    MemoryItem:
+      properties:
+        id:
+          type: string
+          title: Id
+        ts:
+          type: number
+          title: Ts
+        role:
+          type: string
+          title: Role
+        content:
+          type: string
+          title: Content
+        persona:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Persona
+        agent_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Agent Id
+      type: object
+      required:
+      - id
+      - ts
+      - role
+      - content
+      title: MemoryItem
+    MemoryList:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/MemoryItem'
+          type: array
+          title: Items
+      type: object
+      required:
+      - items
+      title: MemoryList
     PlanRequest:
       properties:
         description:
@@ -873,6 +1117,43 @@ components:
       required:
       - content
       title: PolicyApplyRequest
+    QuestItem:
+      properties:
+        id:
+          type: string
+          title: Id
+        goal:
+          type: string
+          title: Goal
+        status:
+          type: string
+          title: Status
+        created_at:
+          type: number
+          title: Created At
+        difficulty:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Difficulty
+      type: object
+      required:
+      - id
+      - goal
+      - status
+      - created_at
+      title: QuestItem
+    QuestListResponse:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/QuestItem'
+          type: array
+          title: Items
+      type: object
+      required:
+      - items
+      title: QuestListResponse
     SuggestGenerateRequest:
       properties:
         goal:
@@ -1047,6 +1328,17 @@ components:
           type: string
           title: Version
           default: '1'
+        tags:
+          items:
+            type: string
+          type: array
+          title: Tags
+          default: []
+        impact:
+          anyOf:
+          - type: object
+          - type: 'null'
+          title: Impact
       type: object
       required:
       - id
@@ -1060,6 +1352,52 @@ components:
       - risk_notes
       - metrics_impact
       title: Suggestion
+    Thought:
+      properties:
+        id:
+          type: string
+          title: Id
+        ts:
+          type: number
+          title: Ts
+        text:
+          type: string
+          title: Text
+        kind:
+          type: string
+          title: Kind
+          default: thought
+        meta:
+          anyOf:
+          - type: object
+          - type: 'null'
+          title: Meta
+        category:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Category
+      type: object
+      required:
+      - id
+      - ts
+      - text
+      title: Thought
+    ThoughtStreamResponse:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/Thought'
+          type: array
+          title: Items
+        total:
+          type: integer
+          title: Total
+      type: object
+      required:
+      - items
+      - total
+      title: ThoughtStreamResponse
     TurnRequest:
       properties:
         agent_id:

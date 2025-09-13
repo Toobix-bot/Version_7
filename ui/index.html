@@ -6,36 +6,49 @@
 	<meta name="viewport" content="width=device-width,initial-scale=1" />
 	<style>
 		body{font-family:system-ui,Arial,sans-serif;margin:0;background:#0f1115;color:#eee;}
-			<div class="row">
-				<span id="suggestOpenBadge" class="pill">open: ?</span>
-				<button id="btnSuggestList" class="secondary">Refresh List</button>
-			</div>
 		header{padding:12px 20px;background:#1b1f27;display:flex;align-items:center;gap:16px;}
 		h1{font-size:18px;margin:0;}
-		main{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px;padding:14px;}
-		section{background:#1d222b;border:1px solid #2b313c;border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:8px;}
-		section h2{font-size:15px;margin:0 0 4px;font-weight:600;color:#9bd2ff;}
+		#tabsBar{display:flex;gap:4px;flex-wrap:wrap;padding:8px 14px;background:#14181f;border-bottom:1px solid #252b33;}
+		#tabsBar button{background:#25303c;color:#cfd8e3;border:1px solid #2f3a45;border-radius:6px;padding:6px 10px;font-size:13px;cursor:pointer;}
+		#tabsBar button.active{background:#2563eb;color:#fff;border-color:#2563eb;}
+		main{padding:14px;}
+		.tabSection{display:none;}
+		.tabSection.active{display:flex;flex-direction:column;gap:12px;}
+		section.panel{background:#1d222b;border:1px solid #2b313c;border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:8px;min-width:0;}
+		section.panel h2{font-size:15px;margin:0 0 4px;font-weight:600;color:#9bd2ff;display:flex;align-items:center;gap:8px;}
 		button{cursor:pointer;background:#2563eb;color:#fff;border:0;border-radius:4px;padding:6px 10px;font-size:13px;display:inline-flex;align-items:center;gap:6px;}
 		button.secondary{background:#374151;}
 		button:disabled{opacity:.4;cursor:not-allowed;}
-		input,textarea{width:100%;background:#11161c;color:#eee;border:1px solid #2e3a45;border-radius:4px;padding:6px;font-family:inherit;font-size:13px;}
+		input,textarea,select{width:100%;background:#11161c;color:#eee;border:1px solid #2e3a45;border-radius:4px;padding:6px;font-family:inherit;font-size:13px;}
 		textarea{min-height:90px;resize:vertical;}
-				<button id="btnSuggestRefine" class="secondary">Refine (LLM)</button>
-			</div>
-			<div class="row">
-				<button id="btnSuggestDownload" class="secondary">Download JSON</button>
-				<button id="btnSuggestCopyPatch" class="secondary">Copy Patch Diff</button>
 		code,pre{background:#11161c;color:#d1e7ff;font-size:12px;line-height:1.4;border:1px solid #2b313c;border-radius:4px;padding:8px;white-space:pre-wrap;word-break:break-word;max-height:260px;overflow:auto;margin:0;}
 		.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;}
-			<div id="suggestList" style="display:flex;flex-direction:column;gap:4px;max-height:140px;overflow:auto;border:1px solid #2b313c;padding:6px;border-radius:6px;background:#151a20;font-size:12px;"><em style="color:#667">Liste leer – Refresh.</em></div>
 		.pill{background:#243244;padding:2px 8px;border-radius:999px;font-size:11px;color:#9fbcd9;border:1px solid #324556;}
-			<pre id="suggestPatchOut">Patch Output...</pre>
 		footer{padding:10px 16px;font-size:12px;color:#7b8793;text-align:center;border-top:1px solid #2b313c;margin-top:8px;}
 		a{color:#70b8ff;text-decoration:none;}a:hover{text-decoration:underline;}
-		.status-ok{color:#4ade80}.status-warn{color:#fbbf24}.status-err{color:#f87171}
-		.flex{display:flex;gap:6px;align-items:center;}
-		.grow{flex:1 1 auto;}
-		.mono{font-family:ui-monospace,monospace;}
+		.badge{background:#2c3650;padding:2px 6px;border-radius:6px;font-size:11px;color:#bcd;}
+		.category-badge{padding:2px 6px;border-radius:6px;font-size:10px;font-weight:600;letter-spacing:.5px;text-transform:uppercase;}
+		.cat-risk{background:#3a1214;color:#f87171;border:1px solid #803036;}
+		.cat-opportunity{background:#12391d;color:#4ade80;border:1px solid #2f6c43;}
+		.cat-action{background:#122b3a;color:#38bdf8;border:1px solid #1d4d63;}
+		.cat-system{background:#27272a;color:#d4d4d8;border:1px solid #3f3f46;}
+		.cat-neutral{background:#2c2f36;color:#9ca3af;border:1px solid #383e46;}
+		#suggestList button{font-size:11px;}
+		.small{font-size:11px;opacity:.75;}
+		/* Diff styling */
+		#suggestPatchNav{display:flex;flex-wrap:wrap;gap:4px;margin:4px 0;}
+		#suggestPatchNav a{background:#25303c;color:#cbd5e1;text-decoration:none;font-size:11px;padding:2px 6px;border-radius:4px;border:1px solid #2f3a45;}
+		#suggestPatchNav a:hover{background:#2563eb;color:#fff;}
+		.diff-container{background:#0f1419;border:1px solid #2b313c;border-radius:6px;padding:6px;max-height:300px;overflow:auto;font-family:ui-monospace,monospace;font-size:12px;line-height:1.35;}
+		.diff-line{display:block;white-space:pre;}
+		.diff-file{background:#1e293b;color:#f1f5f9;font-weight:600;border-top:1px solid #334155;padding:2px 4px;margin:2px -4px 2px -4px;}
+		.diff-hunk{background:#243244;color:#9bd2ff;font-weight:600;padding:2px 4px;margin:2px -4px;}
+		.diff-add{background:#062a18;color:#b6f3ce;}
+		.diff-del{background:#3a1214;color:#fda4af;}
+		.diff-context{color:#cbd5e1;}
+		.diff-line .ln{display:inline-block;width:70px;opacity:.55;color:#94a3b8;}
+		.diff-line.highlight{outline:1px solid #facc15;background:linear-gradient(90deg,#423511,#3a2f13);}
+		#suggestPatchOut{background:transparent;border:0;padding:0;}
 	</style>
 </head>
 <body>
@@ -53,9 +66,11 @@
 			<button id="btnEvents" class="secondary">Events</button>
 		</div>
 	</header>
+	<div id="tabsBar"></div>
 	<main>
-		<section>
-			<h2>Meta & LLM</h2>
+		<div id="tab-uebersicht" class="tabSection active">
+			<section class="panel">
+			<h2>Übersicht</h2>
 			<div class="row">
 				<span class="pill" id="metaVersion">ver...</span>
 				<span class="pill" id="metaUptime">uptime...</span>
@@ -63,38 +78,52 @@
 			</div>
 			<pre id="metaOut">Meta Output...</pre>
 			<pre id="llmOut">LLM Output...</pre>
-		</section>
-		<section>
-			<h2>Plan Demo</h2>
-			<input id="planIntent" placeholder="Intent" value="demo" />
-			<textarea id="planContext" placeholder="Context">kurzer test</textarea>
-			<input id="planTargets" placeholder="target_paths (komma)" value="api/app.py" />
+			</section>
+		</div>
+		<div id="tab-plan" class="tabSection">
+			<section class="panel">
+			<h2>Plan</h2>
+			<input id="planIntent" placeholder="Intent / Ziel" value="demo" />
+			<textarea id="planContext" placeholder="Kontext">kurzer test</textarea>
+			<input id="planTargets" placeholder="Dateipfade (Komma)" value="api/app.py" />
 			<div class="row">
 				<select id="riskBudget" style="flex:1;min-width:120px;">
-					<option value="">risk_budget (auto)</option>
-					<option value="low">low</option>
-					<option value="medium">medium</option>
-					<option value="high">high</option>
+					<option value="">Risiko (auto)</option>
+					<option value="low">Niedrig</option>
+					<option value="medium">Mittel</option>
+					<option value="high">Hoch</option>
 				</select>
-				<button id="btnPlan">/plan ausführen</button>
+				<button id="btnPlan">Plan erstellen</button>
 			</div>
 			<div id="variantList" style="display:flex;flex-direction:column;gap:6px;max-height:140px;overflow:auto;border:1px solid #2b313c;padding:6px;border-radius:6px;background:#151a20;">
 				<em style="font-size:12px;color:#667">Noch keine Varianten geladen.</em>
 			</div>
 			<pre id="planVariantDetail">Variant Detail...</pre>
 			<pre id="planOut">Raw Plan Output...</pre>
-		</section>
-		<section>
-			<h2>LLM Chat</h2>
-			<textarea id="chatPrompt" placeholder="Prompt">Sag kurz Hallo.</textarea>
+			</section>
+		</div>
+		<div id="tab-chat" class="tabSection">
+			<section class="panel">
+			<h2>Chat</h2>
 			<div class="row">
-				<button id="btnChat">/llm/chat</button>
+				<select id="persona" style="flex:1;min-width:110px;">
+					<option value="">Persona: Standard</option>
+					<option value="mentor">mentor</option>
+					<option value="auditor">auditor</option>
+					<option value="architekt">architekt</option>
+					<option value="erzähler">erzähler</option>
+				</select>
+				<input id="agentId" placeholder="Agent ID (optional)" style="width:140px;" />
+				<button id="btnChat">Senden</button>
 				<span id="chatInfo" class="pill">not configured</span>
 			</div>
+			<textarea id="chatPrompt" placeholder="Nachricht">Sag kurz Hallo.</textarea>
 			<pre id="chatOut">Chat Output...</pre>
-		</section>
-		<section>
-			<h2>Events & Metrics</h2>
+			</section>
+		</div>
+		<div id="tab-events" class="tabSection">
+			<section class="panel">
+			<h2>Ereignisse & Metriken</h2>
 			<div class="row">
 				<span id="eventsState" class="pill">events: idle</span>
 				<span id="metricsState" class="pill">metrics: idle</span>
@@ -103,43 +132,97 @@
 			</div>
 			<pre id="eventsOut">Events...</pre>
 			<pre id="metricsOut">Metrics...</pre>
-		</section>
-		<section>
-			<h2>Policy Editor</h2>
+			</section>
+		</div>
+		<div id="tab-policy" class="tabSection">
+			<section class="panel">
+			<h2>Richtlinien</h2>
 			<div class="row">
-				<button id="btnPolicyLoad" class="secondary">Load</button>
-				<button id="btnPolicyValidate">Validate</button>
-				<button id="btnPolicyApply">Apply</button>
+				<button id="btnPolicyLoad" class="secondary">Laden</button>
+				<button id="btnPolicyValidate">Prüfen</button>
+				<button id="btnPolicyApply">Anwenden</button>
 				<span id="policyStatus" class="pill">policy: ?</span>
 			</div>
 			<textarea id="policyContent" placeholder="YAML policy..." spellcheck="false"></textarea>
 			<pre id="policyOut">Policy Output...</pre>
-		</section>
-		<section>
-			<h2>Suggestions</h2>
-			<input id="suggestGoal" placeholder="Ziel / Goal" value="Test Abdeckung verbessern" />
-			<input id="suggestFocus" placeholder="focus paths (comma)" />
-			<div class="row">
-				<button id="btnSuggestGen">Generate</button>
-				<input id="suggestId" placeholder="Suggestion ID" style="flex:1;" />
-			</div>
-			<div class="row">
-				<button id="btnSuggestLoad" class="secondary">Load</button>
-				<button id="btnSuggestApprove" class="secondary">Approve</button>
-				<button id="btnSuggestRevise" class="secondary">Revise</button>
-			</div>
-			<textarea id="suggestAdjust" placeholder="Anpassungen (für Revise)" style="min-height:60px;"></textarea>
-			<pre id="suggestOut">Suggestion Output...</pre>
-		</section>
-			<section>
-				<h2>Idle Game</h2>
-				<div class="row">
-					<button id="btnIdleState" class="secondary">/game/idle/state</button>
-					<button id="btnIdleTick">/game/idle/tick</button>
-					<span id="idleInfo" class="pill">tick: -</span>
-				</div>
-				<pre id="idleOut">Idle State...</pre>
 			</section>
+		</div>
+		<div id="tab-memory" class="tabSection">
+			<section class="panel">
+			<h2>Gedächtnis</h2>
+			<div class="row"><button id="btnMemRefresh" class="secondary">Aktualisieren</button><span id="memInfo" class="pill">-</span></div>
+			<pre id="memoryOut">Memory...</pre>
+			</section>
+		</div>
+		<div id="tab-quests" class="tabSection">
+			<section class="panel">
+			<h2>Quests</h2>
+			<div class="row">
+				<input id="questTheme" placeholder="Thema" style="flex:1;" />
+				<select id="questDifficulty">
+					<option value="easy">leicht</option>
+					<option value="normal" selected>normal</option>
+					<option value="hard">schwer</option>
+				</select>
+				<button id="btnQuestGen">Erzeugen</button>
+			</div>
+			<div class="row"><button id="btnQuestList" class="secondary">Aktualisieren</button></div>
+			<pre id="questOut">Quests...</pre>
+			</section>
+		</div>
+		<div id="tab-vorschlaege" class="tabSection">
+			<section class="panel">
+			<h2>Vorschläge <span id="suggestOpenBadge" class="badge">open: ?</span></h2>
+			<div class="row">
+				<button id="btnSuggestList" class="secondary">Aktualisieren</button>
+				<button id="btnSuggestGen">Generieren</button>
+				<input id="suggestId" placeholder="ID" style="flex:1;" />
+			</div>
+			<div class="row">
+				<button id="btnSuggestLoad" class="secondary">Laden</button>
+				<button id="btnSuggestApprove" class="secondary">Genehmigen</button>
+				<button id="btnSuggestRevise" class="secondary">Überarbeiten</button>
+				<button id="btnSuggestRefine" class="secondary">Verfeinern (LLM)</button>
+			</div>
+			<div class="row">
+				<button id="btnSuggestDownload" class="secondary">JSON</button>
+				<button id="btnSuggestCopyPatch" class="secondary">Patch kopieren</button>
+				<button id="btnSuggestChunks" class="secondary">Diff Teile</button>
+			</div>
+			<input id="suggestGoal" placeholder="Ziel" value="Test Abdeckung verbessern" />
+			<input id="suggestFocus" placeholder="Fokus Pfade (Komma)" />
+			<textarea id="suggestAdjust" placeholder="Anpassungen / Hinweise" style="min-height:60px;"></textarea>
+			<div class="row"><input id="patchSearch" placeholder="Patch Suche (Regex)" style="flex:1;" /></div>
+			<div id="suggestList" style="display:flex;flex-direction:column;gap:4px;max-height:120px;overflow:auto;border:1px solid #2b313c;padding:6px;border-radius:6px;background:#151a20;font-size:12px;"><em style="color:#667">Liste leer – Refresh.</em></div>
+			<pre id="suggestImpactOut">Impact...</pre>
+			<pre id="suggestOut">Suggestion Output...</pre>
+			<div id="suggestPatchNav" class="small">Diff Navigation...</div>
+			<div id="suggestPatchOut" class="diff-container">Patch Output...</div>
+			<pre id="suggestChunksOut">Chunks...</pre>
+			</section>
+		</div>
+		<div id="tab-gedanken" class="tabSection">
+			<section class="panel">
+			<h2>Gedanken</h2>
+			<div class="row">
+				<button id="btnThoughtRefresh" class="secondary">Aktualisieren</button>
+				<button id="btnThoughtGen" class="secondary">Jetzt erzeugen</button>
+				<span id="thoughtInfo" class="pill">-</span>
+			</div>
+			<pre id="thoughtOut">Gedanken...</pre>
+			</section>
+		</div>
+		<div id="tab-game" class="tabSection">
+			<section class="panel">
+			<h2>Spiel</h2>
+			<div class="row">
+				<button id="btnIdleState" class="secondary">Status</button>
+				<button id="btnIdleTick">Tick</button>
+				<span id="idleInfo" class="pill">tick: -</span>
+			</div>
+			<pre id="idleOut">Idle State...</pre>
+			</section>
+		</div>
 	</main>
 	<footer>
 		&copy; Life-Agent Dev • <a href="/docs" target="_blank">OpenAPI Docs</a>
@@ -152,6 +235,34 @@
 			const headers = Object.assign({'X-API-Key': key}, opts.headers||{});
 			return fetch(path, {...opts, headers}).then(r => r.json().catch(()=>({error:'non-json', status:r.status})));
 		};
+		// Tabs setup
+		const TABS = [
+			['uebersicht','Übersicht'],
+			['plan','Plan'],
+			['chat','Chat'],
+			['vorschlaege','Vorschläge'],
+			['quests','Quests'],
+			['memory','Gedächtnis'],
+			['gedanken','Gedanken'],
+			['events','Events'],
+			['policy','Richtlinien'],
+			['game','Spiel']
+		];
+		function buildTabs(){
+			const bar = $('#tabsBar');
+			bar.innerHTML='';
+			TABS.forEach(([id,label])=>{
+				const btn=document.createElement('button');
+				btn.textContent=label; btn.dataset.tab=id;
+				btn.onclick=()=>activateTab(id);
+				bar.appendChild(btn);
+			});
+			activateTab('uebersicht');
+		}
+		function activateTab(id){
+			[...document.querySelectorAll('#tabsBar button')].forEach(b=>b.classList.toggle('active', b.dataset.tab===id));
+			[...document.querySelectorAll('.tabSection')].forEach(sec=>sec.classList.toggle('active', sec.id==='tab-'+id));
+		}
 		function updateApiKeyStatus(){
 			const key=$('#apiKey').value.trim();
 			const pill=$('#apiKeyStatus');
@@ -231,11 +342,7 @@
 				setText('#planVariantDetail', fmt(r.variants[0]));
 			}
 		}
-		async function runChat(){
-			const body={messages:[{role:'user', content: $('#chatPrompt').value}]};
-			const r = await api('/llm/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-			setText('#chatOut', fmt(r));
-		}
+		async function runChat(){ const persona=$('#persona').value||undefined; const agentId=$('#agentId').value.trim()||undefined; const body={messages:[{role:'user',content:$('#chatPrompt').value}], persona, agent_id:agentId}; const r=await api('/llm/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); setText('#chatOut', fmt(r)); refreshMemory(); }
 		let evtSrc=null;
 		function startEvents(){
 			if(evtSrc){evtSrc.close();}
@@ -250,6 +357,8 @@
 					try{const re=new RegExp(filter,'i'); if(!re.test(e.data)) return;}catch{}
 				}
 				pre.textContent += '\n'+e.data; pre.scrollTop=pre.scrollHeight; 
+				if(e.data.includes('suggest.open')){ const m=e.data.match(/"open":\s*(\d+)/); if(m) updateOpenBadge(parseInt(m[1])); }
+				if(e.data.includes('thought.stream')){ refreshThoughts(); }
 			};
 			evtSrc.onerror=()=>$('#eventsState').textContent='events: error';
 		}
@@ -262,159 +371,63 @@
 			$('#metricsOut').textContent = txt.split('\n').slice(0,80).join('\n');
 			$('#metricsState').textContent='metrics: ok';
 		}
-
-		$('#btnMeta').onclick=loadMeta;
-		$('#btnLLM').onclick=loadLLM;
-		$('#btnPlan').onclick=runPlan;
-		$('#btnChat').onclick=runChat;
-		$('#btnEvents').onclick=startEvents;
-		$('#btnMetrics').onclick=loadMetrics;
-		$('#btnIdleState').onclick=loadIdleState;
-		$('#btnIdleTick').onclick=runIdleTick;
-		$('#btnPolicyLoad').onclick=loadPolicy;
-		$('#btnPolicyValidate').onclick=validatePolicy;
-		$('#btnPolicyApply').onclick=applyPolicy;
-		$('#btnSuggestGen').onclick=genSuggest;
-		$('#btnSuggestLoad').onclick=loadSuggest;
-		$('#btnSuggestApprove').onclick=approveSuggest;
-		$('#btnSuggestRevise').onclick=reviseSuggest;
-        // new suggestion feature buttons
-        const btnList = document.getElementById('btnSuggestList');
-        const btnRefine = document.getElementById('btnSuggestRefine');
-        const btnDownload = document.getElementById('btnSuggestDownload');
-        const btnCopyPatch = document.getElementById('btnSuggestCopyPatch');
-        if(btnList) btnList.onclick=refreshSuggestList;
-        if(btnRefine) btnRefine.onclick=refineSuggest;
-        if(btnDownload) btnDownload.onclick=downloadSuggest;
-        if(btnCopyPatch) btnCopyPatch.onclick=copySuggestPatch;
-		// initial
-		loadStoredKey();
-		loadMeta();
-		loadLLM();
-		async function loadIdleState(){
-			const r = await api('/game/idle/state');
-			setText('#idleOut', fmt(r));
-			if(r.state){$('#idleInfo').textContent='tick: '+r.state.tick+' res:'+r.state.resources;}
+		// Suggestions
+		function updateOpenBadge(n){ const b=$('#suggestOpenBadge'); if(!b) return; b.textContent='open: '+n; b.style.background = n>0? '#3a2f13':'#1f3b2b'; b.style.color = n>0? '#facc15':'#6ee7b7'; }
+		async function refreshSuggestList(){ const r=await api('/suggest/list?limit=50'); const box=$('#suggestList'); if(!box) return; if(!r.items||!r.items.length){ box.innerHTML='<em style="color:#667">Keine Einträge.</em>'; if(typeof r.open==='number') updateOpenBadge(r.open); return;} box.innerHTML=''; r.items.forEach(it=>{ const row=document.createElement('button'); row.className='secondary'; row.style.display='flex'; row.style.justifyContent='space-between'; row.style.width='100%'; row.textContent = `${it.id} · ${it.status}`; row.onclick=()=>{ $('#suggestId').value=it.id; loadSuggest(); }; box.appendChild(row); }); if(typeof r.open==='number') updateOpenBadge(r.open); }
+		async function genSuggest(){ const goal=$('#suggestGoal').value.trim(); const focus=$('#suggestFocus').value.split(',').map(s=>s.trim()).filter(Boolean); const body={goal, focus_paths:focus.length?focus:undefined}; const r=await api('/suggest/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); setText('#suggestOut', fmt(r)); if(r.id) $('#suggestId').value=r.id; refreshSuggestList(); }
+		async function loadSuggest(){ const id=$('#suggestId').value.trim(); if(!id) return; const r=await api('/suggest/review?id='+encodeURIComponent(id)); setText('#suggestOut', fmt(r)); if(r.potential_patches) renderPatch(r.potential_patches); loadImpact(id); }
+		async function approveSuggest(){ const id=$('#suggestId').value.trim(); if(!id) return; const body={id, approve:true}; const r=await api('/suggest/review',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); setText('#suggestOut', fmt(r)); refreshSuggestList(); loadImpact(id); }
+		async function reviseSuggest(){ const id=$('#suggestId').value.trim(); if(!id) return; const adjustments=$('#suggestAdjust').value; const body={id, approve:false, adjustments}; const r=await api('/suggest/review',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); setText('#suggestOut', fmt(r)); refreshSuggestList(); loadImpact(id); }
+		async function refineSuggest(){ const id=$('#suggestId').value.trim(); if(!id) return; const instruction=$('#suggestAdjust').value.trim(); const body={id, instruction:instruction||undefined}; const r=await api('/suggest/llm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); setText('#suggestOut', fmt(r)); refreshSuggestList(); loadImpact(id); }
+		async function loadImpact(id){ const r=await api('/suggest/impact?id='+encodeURIComponent(id)); if(r && r.impact){ setText('#suggestImpactOut', 'Impact Score: '+r.impact.score+'\n'+(r.impact.rationale||'')); } else { setText('#suggestImpactOut','Impact: -'); } }
+		function renderPatch(patches){
+			const container=$('#suggestPatchOut'); const nav=$('#suggestPatchNav'); if(!container) return;
+			if(!patches||!patches.length){ container.textContent='(no patches)'; if(nav) nav.textContent=''; return; }
+			const all=patches.map(p=>p.diff).join('\n\n');
+			container.innerHTML=''; nav.innerHTML='';
+			const searchVal=($('#patchSearch')?.value||'').trim(); let searchRe=null; if(searchVal){ try{ searchRe=new RegExp(searchVal,'i'); }catch{} }
+			let fileIndex=0, hunkIndex=0;
+			const lines=all.split(/\n/);
+			lines.forEach((raw,i)=>{
+				let cls='diff-line diff-context';
+				if(raw.startsWith('+++')||raw.startsWith('---')){ return; }
+				if(raw.startsWith('diff --git')){ fileIndex++; hunkIndex=0; const a=document.createElement('div'); a.className='diff-line diff-file'; a.id='file-'+fileIndex; a.textContent=raw; container.appendChild(a); const link=document.createElement('a'); link.href='#file-'+fileIndex; link.textContent='Datei '+fileIndex; nav.appendChild(link); return; }
+				if(raw.startsWith('@@')){ hunkIndex++; const a=document.createElement('div'); a.className='diff-line diff-hunk'; a.id='hunk-'+fileIndex+'-'+hunkIndex; a.textContent=raw; container.appendChild(a); const link=document.createElement('a'); link.href='#hunk-'+fileIndex+'-'+hunkIndex; link.textContent='Hunk '+fileIndex+':'+hunkIndex; nav.appendChild(link); return; }
+				if(raw.startsWith('+')) cls='diff-line diff-add'; else if(raw.startsWith('-')) cls='diff-line diff-del';
+				const el=document.createElement('div'); el.className=cls;
+				let display=raw; // line numbers extraction
+				// simplistic context line numbers not parsed from header; keep placeholder
+				el.innerHTML='<span class="ln">'+(i+1).toString().padStart(5,' ')+'</span>'+escapeHtml(display);
+				if(searchRe && searchRe.test(raw)){ el.classList.add('highlight'); }
+				container.appendChild(el);
+			});
 		}
-		async function runIdleTick(){
-			const r = await api('/game/idle/tick',{method:'POST'});
-			setText('#idleOut', fmt(r));
-			if(r.state){$('#idleInfo').textContent='tick: '+r.state.tick+' res:'+r.state.resources;}
-		}
-		async function loadPolicy(){
-			const r = await api('/policy/current');
-			setText('#policyOut', fmt(r));
-			if(r.policy){ $('#policyContent').value = jsyaml.dump(r.policy); $('#policyStatus').textContent='policy: loaded'; setText('#badgePolicy','policy: loaded'); setBadge($('#badgePolicy'), true);} else { setText('#badgePolicy','policy: none'); setBadge($('#badgePolicy'), false); }
-		}
-		async function validatePolicy(){
-			const content = $('#policyContent').value;
-			const body = {content, dry_run:true};
-			const r = await api('/policy/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-			setText('#policyOut', fmt(r));
-			$('#policyStatus').textContent = r.status==='validated'? 'policy: valid':'policy: ?'; if(r.status==='validated'){ setText('#badgePolicy','policy: valid'); setBadge($('#badgePolicy'), true);} else { setBadge($('#badgePolicy'), false); }
-		}
-		async function applyPolicy(){
-			const content = $('#policyContent').value;
-			const body = {content, dry_run:false};
-			const r = await api('/policy/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-			setText('#policyOut', fmt(r));
-			$('#policyStatus').textContent = r.status==='applied'? 'policy: applied':'policy: ?'; if(r.status==='applied'){ setText('#badgePolicy','policy: applied'); setBadge($('#badgePolicy'), true);} else { setBadge($('#badgePolicy'), false); }
-		}
-		async function genSuggest(){
-			const goal=$('#suggestGoal').value.trim();
-			const focus=$('#suggestFocus').value.split(',').map(s=>s.trim()).filter(Boolean);
-			const body={goal, focus_paths:focus.length?focus:undefined};
-			const r=await api('/suggest/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-			setText('#suggestOut', fmt(r));
-			if(r.id) $('#suggestId').value=r.id;
-		}
-		async function loadSuggest(){
-			const id=$('#suggestId').value.trim(); if(!id) return;
-			const r=await api('/suggest/review?id='+encodeURIComponent(id));
-			setText('#suggestOut', fmt(r));
-		}
-		async function approveSuggest(){
-			const id=$('#suggestId').value.trim(); if(!id) return;
-			const body={id, approve:true};
-			const r=await api('/suggest/review',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-			setText('#suggestOut', fmt(r));
-			if(r.suggestion && r.suggestion.id) $('#suggestId').value=r.suggestion.id;
-		}
-		async function reviseSuggest(){
-			const id=$('#suggestId').value.trim(); if(!id) return;
-			const adjustments=$('#suggestAdjust').value;
-			const body={id, approve:false, adjustments};
-			const r=await api('/suggest/review',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-			setText('#suggestOut', fmt(r));
-			if(r.suggestion && r.suggestion.id) $('#suggestId').value=r.suggestion.id;
-		}
-        async function refreshSuggestList(){
-            const r = await api('/suggest/list?limit=50');
-            const box = document.getElementById('suggestList');
-            if(!box) return;
-            if(!r.items || !r.items.length){ box.innerHTML='<em style="color:#667">Keine Einträge.</em>'; return; }
-            box.innerHTML='';
-            r.items.forEach(it=>{
-                const row=document.createElement('button');
-                row.className='secondary';
-                row.style.display='flex';
-                row.style.justifyContent='space-between';
-                row.style.width='100%';
-                row.textContent = `${it.id} · ${it.status}`;
-                row.onclick=()=>{ document.getElementById('suggestId').value=it.id; loadSuggest(); };
-                box.appendChild(row);
-            });
-            if(typeof r.open_count==='number') updateOpenBadge(r.open_count);
-        }
-        function updateOpenBadge(n){
-            const b=document.getElementById('suggestOpenBadge');
-            if(!b) return; b.textContent='open: '+n; b.style.background = n>0? '#3a2f13':'#1f3b2b'; b.style.color = n>0? '#facc15':'#6ee7b7';
-        }
-        async function refineSuggest(){
-            const id=document.getElementById('suggestId').value.trim(); if(!id) return;
-            const instructions=document.getElementById('suggestAdjust').value.trim();
-            const body={id,instructions:instructions||undefined};
-            const r=await api('/suggest/llm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-            setText('#suggestOut', fmt(r));
-            if(r.suggestion && r.suggestion.id) document.getElementById('suggestId').value=r.suggestion.id;
-            if(r.suggestion && r.suggestion.potential_patches){ renderPatch(r.suggestion.potential_patches); }
-        }
-        function renderPatch(patches){
-            const pre=document.getElementById('suggestPatchOut'); if(!pre) return;
-            if(!patches || !patches.length){ pre.textContent='(no patches)'; return; }
-            // simple highlight additions/deletions
-            const lines=[];
-            patches.forEach(p=>{
-                (p.diff||'').split(/\n/).forEach(l=>{
-                    if(l.startsWith('+')) lines.push('%c'+l,'color:#4ade80');
-                    else if(l.startsWith('-')) lines.push('%c'+l,'color:#f87171');
-                    else lines.push('%c'+l,'color:#9fbcd9');
-                });
-            });
-            pre.textContent = patches.map(p=>p.diff).join('\n\n');
-        }
-        async function downloadSuggest(){
-            const id=document.getElementById('suggestId').value.trim(); if(!id) return;
-            const r=await api('/suggest/review?id='+encodeURIComponent(id));
-            const blob=new Blob([JSON.stringify(r,null,2)],{type:'application/json'});
-            const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='suggestion-'+id+'.json'; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1500);
-        }
-        async function copySuggestPatch(){
-            const pre=document.getElementById('suggestPatchOut'); if(!pre) return; const txt=pre.textContent; if(!txt.trim()) return;
-            try{ await navigator.clipboard.writeText(txt); }catch{}
-        }
-        // extend events stream for open count updates
-        const origOnMessage = startEvents;
-        // monkey patch not necessary; we append logic inside SSE handler by wrapping after definition
-        const _startEvents=startEvents; startEvents=function(){
-            _startEvents();
-            if(evtSrc){
-                const origHandler=evtSrc.onmessage; evtSrc.onmessage=e=>{
-                    if(origHandler) origHandler(e);
-                    try{ if(e.data.includes('suggest.open')){ const m=e.data.match(/open_count=(\d+)/); if(m) updateOpenBadge(parseInt(m[1])); } }catch{}
-                };
-            }
-        };
+		function escapeHtml(s){ return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+		async function downloadSuggest(){ const id=$('#suggestId').value.trim(); if(!id) return; const r=await api('/suggest/review?id='+encodeURIComponent(id)); const blob=new Blob([JSON.stringify(r,null,2)],{type:'application/json'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='suggestion-'+id+'.json'; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1500); }
+		async function copySuggestPatch(){ const pre=$('#suggestPatchOut'); if(!pre) return; const txt=pre.textContent; if(!txt.trim()) return; try{ await navigator.clipboard.writeText(txt);}catch{} }
+		// Thought Stream
+		function catClass(cat){ switch(cat){ case 'risk':return 'cat-risk'; case 'opportunity':return 'cat-opportunity'; case 'action':return 'cat-action'; case 'system':return 'cat-system'; default:return 'cat-neutral'; } }
+		async function refreshThoughts(){ const r=await api('/thought/stream?limit=50'); const pre=$('#thoughtOut'); if(!r.items){ pre.textContent='Keine Gedanken'; return;} pre.textContent=r.items.map(t=>{ const time=new Date(t.ts*1000).toLocaleTimeString(); const cat=t.category||'neutral'; return `${time} · [${cat.toUpperCase()}] ${t.text}`; }).join('\n'); $('#thoughtInfo').textContent = 'total '+r.total; }
+		async function genThought(){ const r=await api('/thought/generate',{method:'POST'}); refreshThoughts(); }
+		// Events patch already updates open badge & triggers refreshThoughts
+		$('#btnThoughtRefresh').onclick=refreshThoughts; $('#btnThoughtGen').onclick=genThought;
+		// Bind buttons
+		$('#btnMeta').onclick=loadMeta; $('#btnLLM').onclick=loadLLM; $('#btnPlan').onclick=runPlan; $('#btnChat').onclick=runChat; $('#btnEvents').onclick=startEvents; $('#btnMetrics').onclick=loadMetrics; $('#btnIdleState').onclick=loadIdleState; $('#btnIdleTick').onclick=runIdleTick; $('#btnPolicyLoad').onclick=loadPolicy; $('#btnPolicyValidate').onclick=validatePolicy; $('#btnPolicyApply').onclick=applyPolicy; $('#btnSuggestGen').onclick=genSuggest; $('#btnSuggestLoad').onclick=loadSuggest; $('#btnSuggestApprove').onclick=approveSuggest; $('#btnSuggestRevise').onclick=reviseSuggest; $('#btnSuggestRefine').onclick=refineSuggest; $('#btnSuggestList').onclick=refreshSuggestList; $('#btnSuggestDownload').onclick=downloadSuggest; $('#btnSuggestCopyPatch').onclick=copySuggestPatch;
+		// Idle
+		async function loadIdleState(){ const r=await api('/game/idle/state'); setText('#idleOut', fmt(r)); if(r.state){$('#idleInfo').textContent='tick: '+r.state.tick+' res:'+r.state.resources;} }
+		async function runIdleTick(){ const r=await api('/game/idle/tick',{method:'POST'}); setText('#idleOut', fmt(r)); if(r.state){$('#idleInfo').textContent='tick: '+r.state.tick+' res:'+r.state.resources;} }
+		// Policy
+		async function loadPolicy(){ const r=await api('/policy/current'); setText('#policyOut', fmt(r)); if(r.policy){ $('#policyContent').value = jsyaml.dump(r.policy); $('#policyStatus').textContent='policy: loaded'; setText('#badgePolicy','policy: loaded'); setBadge($('#badgePolicy'), true);} else { setText('#badgePolicy','policy: none'); setBadge($('#badgePolicy'), false);} }
+		async function validatePolicy(){ const content=$('#policyContent').value; const body={content, dry_run:true}; const r=await api('/policy/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); setText('#policyOut', fmt(r)); $('#policyStatus').textContent = r.status==='validated'? 'policy: valid':'policy: ?'; if(r.status==='validated'){ setText('#badgePolicy','policy: valid'); setBadge($('#badgePolicy'), true);} else { setBadge($('#badgePolicy'), false);} }
+		async function applyPolicy(){ const content=$('#policyContent').value; const body={content, dry_run:false}; const r=await api('/policy/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); setText('#policyOut', fmt(r)); $('#policyStatus').textContent = r.status==='applied'? 'policy: applied':'policy: ?'; if(r.status==='applied'){ setText('#badgePolicy','policy: applied'); setBadge($('#badgePolicy'), true);} else { setBadge($('#badgePolicy'), false);} }
+		// Memory & quests & thought helpers
+		async function refreshMemory(){ const agentId=$('#agentId')? $('#agentId').value.trim():''; const q=agentId? ('?agent_id='+encodeURIComponent(agentId)) : ''; const r=await api('/memory/list'+q); setText('#memoryOut', fmt(r)); $('#memInfo').textContent = r.items? r.items.length+' Einträge':'-'; }
+		async function refreshQuestList(){ const r=await api('/quest/list'); setText('#questOut', fmt(r)); }
+		$('#btnMemRefresh').onclick=refreshMemory; $('#btnQuestList').onclick=refreshQuestList; $('#btnQuestGen').onclick=genQuest;
+		async function genQuest(){ const theme=$('#questTheme').value.trim()||undefined; const difficulty=$('#questDifficulty').value; const body={theme,difficulty}; const r=await api('/quest/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); setText('#questOut', fmt(r)); refreshQuestList(); }
+		// Init
+		buildTabs();
+		loadStoredKey(); loadMeta(); loadLLM(); refreshSuggestList(); refreshThoughts(); refreshMemory(); refreshQuestList();
 	</script>
 </body>
 </html>

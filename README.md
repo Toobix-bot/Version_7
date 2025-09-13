@@ -2,14 +2,108 @@
 
 Self-Observing Life-Agent Development Environment (MVP).
 
+> Dokumentationsstruktur nach Divio: Tutorial (Start), How-To (Aufgaben), Reference (API/Felder), Explanation (Hintergründe). Dieser README bündelt die wichtigsten Einstiegspfade für schnelle Wirksamkeit.
+
 ## Kurz erklärt
 Ein kleiner Server mit UI, der Pläne baut, sich selbst beobachtet und sich per Regeln steuern lässt. In der Web-UI siehst du Meta/LLM-Infos, eine Plan-Demo, einen LLM-Chat (sparsam) sowie Live-Bereiche für Events & Metrics.
+
+Neu: Tab-basierte deutsche UI, Impact-Score für Vorschläge, Multi-Agent Memory (`agent_id`), Quest-Fortschritt, kategorisierte Gedanken (risk/opportunity/action/system/neutral) und verbesserter Diff-Viewer (Zeilennummern, Suche, Hunk-Navigation).
 
 Wichtiges auf einen Blick:
 - OpenAPI-Doku: `/docs` (Header `X-API-Key` erforderlich)
 - Live-JSON: `/openapi.json` (enthält `servers` und Security-Schema)
 - Statische Spec: `docs/openapi.yaml` (für GitHub Pages / GPT Actions)
 - Dashboard: `/ui`
+
+## Tutorial – In 5 Minuten zum ersten Plan
+1. API-Key setzen: `.env` anlegen `API_TOKENS=test` oder Env Var exportieren. UI öffnen (`/ui`), rechts oben Key eingeben – Badge wird grün.
+2. Policy laden: Button „Load“ im Policy-Panel (lädt Default oder lege `policy/policy.yaml` an). Bei Fehlern zeigt das Panel strukturierte Meldungen.
+3. Einfachen Plan bauen: Panel „Plan Demo“ – Intent + Ziel-Datei (`api/app.py`) lassen – Button klicken. Varianten erscheinen (vorsichtig / ausgewogen / mutig) mit Parametern.
+4. Live überwachen: Events-Panel öffnen (SSE) – du siehst `plan.created`, Metriken abrufen (`Metrics`).
+5. Vorschlag generieren: Panel „Suggestions“ – Ziel eingeben, Generate → ID merken → optional refine (LLM) oder approve.
+6. Artefakte prüfen: JSON unter `plans/` oder `suggestions/` (Dateiname = ID). Keine direkten Code-Schreiboperationen – nur Patches.
+
+Fertig: Du hast jetzt einen auditierten Änderungsplan + erste Verbesserungsidee im Artefakt-Verzeichnis.
+
+## How-To (Aufgabenorientiert)
+- Plan-Varianten vergleichen: Nach `/plan` → Buttons der Varianten anklicken → Patch Preview / Knobs vergleichen.
+- Vorschlag verfeinern: Suggestion ID laden → Instruktion im Textfeld → „Refine (LLM)“. Fallback-Heuristik greift ohne konfiguriertes LLM.
+- Policy validieren ohne Persistenz: Inhalt editieren → „Validate“ (dry_run) – bei Erfolg „Apply“.
+- Offene Vorschläge reduzieren: Liste refresh → Relevante prüfen → Approve oder Revise. Gauge `suggestions_open_total` sinkt bei Approval.
+- Export statische OpenAPI: `python ops/export_openapi.py` (optional `PUBLIC_SERVER_URL` setzen).
+- PR aus Plan (geplant): Branch & PR via künftigen Endpoint / Script (noch nicht implementiert – siehe Roadmap „Offene Vorhaben“).
+
+## Reference (Auswahl)
+Sicherheitsrelevante Header:
+- `X-API-Key`: Auth für alle schreibenden Routen.
+
+Wichtige Endpoints (GET/POST):
+- `/meta`, `/state`, `/events`, `/metrics`
+- `/plan`, `/act`, `/turn`
+- `/policy/current`, `/policy/apply`
+- `/suggest/generate`, `/suggest/review`, `/suggest/list`, `/suggest/llm`
+- `/suggest/impact` (Impact Score & Rationale eines genehmigten Vorschlags)
+- `/quest/list` (abgeleiteter Status quest:* Tags)
+- `/memory/list?agent_id=` (gefilterte Memory-Einträge pro Agent)
+- `/thought/stream` (kategorisierter Gedankenverlauf)
+- `/env/info`
+- Plugin: `/game/idle/state`, `/game/idle/tick`
+
+Kern-Metriken:
+- `plan_seconds` Histogram → Plan-Latenzen
+- `suggestions_open_total` Gauge → aktuell offene (draft / revised)
+- `suggestions_review_total{action}` → approve vs. revise Rate
+- `policy_denied_total{reason}` → Policy Gate Wirksamkeit
+- `quest_completed_total` Counter → abgeschlossene Quests (approve quest:* Vorschlag)
+- `thought_category_total{category}` Counter → Verteilung Gedanken-Kategorien
+
+SSE Events (Beispiele): `plan.created`, `suggest.generated`, `suggest.revised`, `suggest.approved`, `suggest.open`, `suggest.refined`, `policy.reload`, `idle.tick`.
+
+Artefakt-Verzeichnisse:
+- `plans/` (Plan JSON + Patches Preview)
+- `suggestions/` (Suggestion JSON inkl. weaknesses, rationale, steps, potential_patches)
+
+## Explanation (Warum diese Architektur?)
+- PR-only Change Flow: Minimiert Risiko „Silent Writes“ – jede Änderung transparent über Patches.
+- Gauge für offene Vorschläge: Ermöglicht klare Alert-Schwellen (Work-in-Progress-Kontrolle / Flow).
+- Varianten statt Parameter-Explosion: Drei kuratierte Risikoprofile => geringere kognitive Last.
+- Schwachstellen (weaknesses) im Vorschlag: Erzwingt explizite Risiko- und Qualitätsreflexion vor Umsetzung.
+- SSE Heartbeats (`:keepalive`): Verhindern Idle Timeouts im Browser, stabile UX.
+- Heuristisches LLM-Fallback: System bleibt funktionsfähig ohne API-Key – Developer Experience zuerst.
+
+## Aktueller Stand (Funktionaler Umfang)
+- Security Gates aktiv (API Key, Regex Risk Filter, Whitelist, optional OPA Hook)
+- Plan-Varianten (safe / balanced / bold) + UI Auswahl
+- Suggestions Workflow: generate → (revise/refine) → approve – inklusive Gauge & Events
+- Thought Stream: Hintergrund-"Gedanken" alle 5–10s (konfigurierbar) mit Kontext (open_suggestions, idle_tick) → Events `thought.stream`, abrufbar via `/thought/stream`, manuell triggerbar `/thought/generate`.
+- Gedanken Kategorien: risk / opportunity / action / system / neutral (Heuristik) + Metrik
+- LLM Integration optional (Groq) für Chat & Suggestion Refinement
+- Multi-Agent Memory (`agent_id` Chat & /memory/list)
+- Quests (Tags `quest:*` + Status /quest/list + Event `quest.completed` + Metrik `quest_completed_total`)
+- Impact Scoring bei Approval, abrufbar `/suggest/impact?id=`
+- Policy Editor (Load, Validate, Apply) mit Inline-Fehlern
+- Idle Game Plugin (State + Tick + Events) als Extensibility-Beispiel
+- Observability: Prometheus + strukturierte JSON Logs + SSE Stream
+- Exportierbare OpenAPI (statisch + live) mit Security Schemes & Servers
+- UI Tabs (Deutsch) + verbesserter Diff Viewer (Zeilen, Farben, Navigation, Regex Suche)
+
+## UX / A11y Notes
+- Eingaben besitzen semantische Labels (Browser DevTools prüfen) – zukünftige Erweiterung: ARIA-Live Bereich für Events.
+- Lange Tokens werden via CSS (wrap/break) gekappt (geplant: separate Utility-Klasse – TODO).
+- Lokaler Storage nur für API Key – kein Persist persönlicher Daten.
+
+## Offene Vorhaben / Roadmap (Kurz)
+- PR-Erstellung aus Plan (Branch, Commit, GitHub API Integration)
+- Side-by-Side Diff + Inline Kommentaranker
+- Idle Game Progression / zusätzliche Quests
+- Policy Templates & Wizard
+- Rate Limit Persistenz (Redis)
+- Benchmark / Turn Execution Queue
+- Thought Stream Feintuning (LLM, Sentiment, Trends)
+
+---
+
+Die folgenden Abschnitte spiegeln weiterhin die ursprüngliche Zielsetzung wider und bleiben zur Referenz erhalten.
 
 ## Goals (MVP)
 - FastAPI service with endpoints: `POST /act`, `POST /turn`, `GET /state`, `GET /meta`, `GET /events` (SSE), `GET /metrics`, `POST /policy/reload`, `POST /plan`.
@@ -37,9 +131,16 @@ Exported at `/metrics`:
 - `suggestions_generated_total`
 - `suggestions_review_total{action}` (approve|revise)
 - `suggestions_open_total` (Gauge – aktuell offene Vorschläge)
+- `quest_completed_total`
+- `thought_category_total{category}`
 
 ## SSE
 `GET /events` emits events + `retry:` hint and `:keepalive` comment every 15s.
+
+Neue Events:
+- `quest.completed`
+- `thought.stream` (mit category Feld)
+- `suggest.open` (Open Count Broadcast)
 
 ## Groq Example
 ```
@@ -202,6 +303,22 @@ All handled errors unify as:
 - JWT-based auth alternative.
 - Structured metrics label reduction for cardinality control.
 - Background task queue for heavier `/turn` logic.
+
+## Sprint Addendum (Aktuelle Erweiterungen)
+1. Impact Scoring: Score (0–100) + Rationale & approved_at beim ersten Approve erzeugt.
+2. Multi-Agent Memory: Isolation je `agent_id` über Chat & /memory/list Filter.
+3. Quests: Vorschläge mit Tag `quest:*` → Status pending/done; Metrik & Event.
+4. Gedanken Kategorien: Einfache Keyword-Heuristik → Metrik Aggregation.
+5. Deutsche Tab-UI: Klarere Navigation, reduzierte kognitive Last.
+6. Diff Viewer: Zeilennummern, Farben, Hunk-Navigation, Regex Highlight.
+
+Snippets:
+```
+curl -H "X-API-Key: test" http://localhost:8000/suggest/impact?id=<ID>
+curl -H "X-API-Key: test" http://localhost:8000/memory/list?agent_id=alpha
+curl -H "X-API-Key: test" http://localhost:8000/quest/list
+curl -H "X-API-Key: test" http://localhost:8000/thought/stream?limit=10
+```
 
 ## Operational Alerts (Prometheus Beispiele)
 
