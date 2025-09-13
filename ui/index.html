@@ -6,6 +6,10 @@
 	<meta name="viewport" content="width=device-width,initial-scale=1" />
 	<style>
 		body{font-family:system-ui,Arial,sans-serif;margin:0;background:#0f1115;color:#eee;}
+			<div class="row">
+				<span id="suggestOpenBadge" class="pill">open: ?</span>
+				<button id="btnSuggestList" class="secondary">Refresh List</button>
+			</div>
 		header{padding:12px 20px;background:#1b1f27;display:flex;align-items:center;gap:16px;}
 		h1{font-size:18px;margin:0;}
 		main{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px;padding:14px;}
@@ -16,9 +20,16 @@
 		button:disabled{opacity:.4;cursor:not-allowed;}
 		input,textarea{width:100%;background:#11161c;color:#eee;border:1px solid #2e3a45;border-radius:4px;padding:6px;font-family:inherit;font-size:13px;}
 		textarea{min-height:90px;resize:vertical;}
+				<button id="btnSuggestRefine" class="secondary">Refine (LLM)</button>
+			</div>
+			<div class="row">
+				<button id="btnSuggestDownload" class="secondary">Download JSON</button>
+				<button id="btnSuggestCopyPatch" class="secondary">Copy Patch Diff</button>
 		code,pre{background:#11161c;color:#d1e7ff;font-size:12px;line-height:1.4;border:1px solid #2b313c;border-radius:4px;padding:8px;white-space:pre-wrap;word-break:break-word;max-height:260px;overflow:auto;margin:0;}
 		.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;}
+			<div id="suggestList" style="display:flex;flex-direction:column;gap:4px;max-height:140px;overflow:auto;border:1px solid #2b313c;padding:6px;border-radius:6px;background:#151a20;font-size:12px;"><em style="color:#667">Liste leer – Refresh.</em></div>
 		.pill{background:#243244;padding:2px 8px;border-radius:999px;font-size:11px;color:#9fbcd9;border:1px solid #324556;}
+			<pre id="suggestPatchOut">Patch Output...</pre>
 		footer{padding:10px 16px;font-size:12px;color:#7b8793;text-align:center;border-top:1px solid #2b313c;margin-top:8px;}
 		a{color:#70b8ff;text-decoration:none;}a:hover{text-decoration:underline;}
 		.status-ok{color:#4ade80}.status-warn{color:#fbbf24}.status-err{color:#f87171}
@@ -32,6 +43,10 @@
 		<h1>Life-Agent Dashboard</h1>
 		<div class="row" style="margin-left:auto;">
 			<input id="apiKey" placeholder="API Key" value="test" style="width:160px;" />
+			<span id="apiKeyStatus" class="pill">key?</span>
+			<span id="badgeMeta" class="pill">meta: -</span>
+			<span id="badgeLLM" class="pill">llm: -</span>
+			<span id="badgePolicy" class="pill">policy: -</span>
 			<button id="btnMeta">Meta</button>
 			<button id="btnLLM">LLM Status</button>
 			<button id="btnMetrics" class="secondary">Metrics</button>
@@ -54,8 +69,20 @@
 			<input id="planIntent" placeholder="Intent" value="demo" />
 			<textarea id="planContext" placeholder="Context">kurzer test</textarea>
 			<input id="planTargets" placeholder="target_paths (komma)" value="api/app.py" />
-			<button id="btnPlan">/plan ausführen</button>
-			<pre id="planOut">Plan Output...</pre>
+			<div class="row">
+				<select id="riskBudget" style="flex:1;min-width:120px;">
+					<option value="">risk_budget (auto)</option>
+					<option value="low">low</option>
+					<option value="medium">medium</option>
+					<option value="high">high</option>
+				</select>
+				<button id="btnPlan">/plan ausführen</button>
+			</div>
+			<div id="variantList" style="display:flex;flex-direction:column;gap:6px;max-height:140px;overflow:auto;border:1px solid #2b313c;padding:6px;border-radius:6px;background:#151a20;">
+				<em style="font-size:12px;color:#667">Noch keine Varianten geladen.</em>
+			</div>
+			<pre id="planVariantDetail">Variant Detail...</pre>
+			<pre id="planOut">Raw Plan Output...</pre>
 		</section>
 		<section>
 			<h2>LLM Chat</h2>
@@ -71,15 +98,53 @@
 			<div class="row">
 				<span id="eventsState" class="pill">events: idle</span>
 				<span id="metricsState" class="pill">metrics: idle</span>
+				<input id="eventsFilter" placeholder="filter regex" style="flex:1;min-width:120px;" />
+				<button id="btnFilterClear" class="secondary">X</button>
 			</div>
 			<pre id="eventsOut">Events...</pre>
 			<pre id="metricsOut">Metrics...</pre>
 		</section>
+		<section>
+			<h2>Policy Editor</h2>
+			<div class="row">
+				<button id="btnPolicyLoad" class="secondary">Load</button>
+				<button id="btnPolicyValidate">Validate</button>
+				<button id="btnPolicyApply">Apply</button>
+				<span id="policyStatus" class="pill">policy: ?</span>
+			</div>
+			<textarea id="policyContent" placeholder="YAML policy..." spellcheck="false"></textarea>
+			<pre id="policyOut">Policy Output...</pre>
+		</section>
+		<section>
+			<h2>Suggestions</h2>
+			<input id="suggestGoal" placeholder="Ziel / Goal" value="Test Abdeckung verbessern" />
+			<input id="suggestFocus" placeholder="focus paths (comma)" />
+			<div class="row">
+				<button id="btnSuggestGen">Generate</button>
+				<input id="suggestId" placeholder="Suggestion ID" style="flex:1;" />
+			</div>
+			<div class="row">
+				<button id="btnSuggestLoad" class="secondary">Load</button>
+				<button id="btnSuggestApprove" class="secondary">Approve</button>
+				<button id="btnSuggestRevise" class="secondary">Revise</button>
+			</div>
+			<textarea id="suggestAdjust" placeholder="Anpassungen (für Revise)" style="min-height:60px;"></textarea>
+			<pre id="suggestOut">Suggestion Output...</pre>
+		</section>
+			<section>
+				<h2>Idle Game</h2>
+				<div class="row">
+					<button id="btnIdleState" class="secondary">/game/idle/state</button>
+					<button id="btnIdleTick">/game/idle/tick</button>
+					<span id="idleInfo" class="pill">tick: -</span>
+				</div>
+				<pre id="idleOut">Idle State...</pre>
+			</section>
 	</main>
 	<footer>
 		&copy; Life-Agent Dev • <a href="/docs" target="_blank">OpenAPI Docs</a>
 	</footer>
-
+	<script src="https://cdn.jsdelivr.net/npm/js-yaml@4.1.0/dist/js-yaml.min.js"></script>
 	<script>
 		const $ = sel => document.querySelector(sel);
 		const api = (path, opts={}) => {
@@ -87,8 +152,24 @@
 			const headers = Object.assign({'X-API-Key': key}, opts.headers||{});
 			return fetch(path, {...opts, headers}).then(r => r.json().catch(()=>({error:'non-json', status:r.status})));
 		};
+		function updateApiKeyStatus(){
+			const key=$('#apiKey').value.trim();
+			const pill=$('#apiKeyStatus');
+			if(!pill) return;
+			if(key){pill.textContent='KEY OK'; pill.style.background='#1f3b2b'; pill.style.color='#6ee7b7';}
+			else {pill.textContent='NO KEY'; pill.style.background='#402727'; pill.style.color='#fca5a5';}
+		}
+		function loadStoredKey(){
+			try{const k=localStorage.getItem('life_agent_api_key'); if(k){$('#apiKey').value=k;}}catch{}
+			updateApiKeyStatus();
+		}
+		$('#apiKey').addEventListener('input', ()=>{
+			try{localStorage.setItem('life_agent_api_key',$('#apiKey').value);}catch{}
+			updateApiKeyStatus();
+		});
 		function fmt(obj){try{return JSON.stringify(obj,null,2);}catch{return String(obj)}}
 		function setText(id,content){const el=$(id); if(el) el.textContent=content;}
+		function setBadge(el, ok){ if(!el) return; el.style.background = ok? '#1f3b2b':'#402727'; el.style.color = ok? '#6ee7b7':'#fca5a5'; }
 
 		async function loadMeta(){
 			const meta = await api('/meta');
@@ -96,13 +177,44 @@
 			if(meta.meta){
 				$('#metaVersion').textContent = 'v ' + (meta.meta.version||'?');
 				$('#metaUptime').textContent = 'up ' + ((meta.uptime||0).toFixed? meta.uptime.toFixed(1): meta.uptime);
-			}
+				setText('#badgeMeta','meta: ok'); setBadge($('#badgeMeta'), true);
+			} else { setText('#badgeMeta','meta: err'); setBadge($('#badgeMeta'), false); }
 		}
 		async function loadLLM(){
 			const s = await api('/llm/status');
 			setText('#llmOut', fmt(s));
 			$('#llmConfig').textContent = s.configured? 'LLM ON':'LLM OFF';
 			$('#chatInfo').textContent = s.configured? 'configured':'not configured';
+			setText('#badgeLLM', 'llm: '+(s.configured? 'on':'off')); setBadge($('#badgeLLM'), s.configured);
+		}
+		function renderVariants(r){
+			const box = $('#variantList');
+			box.innerHTML='';
+			if(!r || !Array.isArray(r.variants) || !r.variants.length){
+				box.innerHTML='<em style="font-size:12px;color:#667">Keine Varianten.</em>';
+				return;
+			}
+			r.variants.forEach(v=>{
+				const btn=document.createElement('button');
+				btn.className='secondary';
+				btn.style.justifyContent='space-between';
+				btn.style.display='flex';
+				btn.style.width='100%';
+				btn.textContent=`${v.label} · depth=${v.knobs?.depth_limit} · risk=${v.knobs?.risk_budget}`;
+				btn.onclick=()=>{
+					const detail = {
+						id:v.id,
+						label:v.label,
+						risk_level:v.risk_level,
+						knobs:v.knobs,
+						summary:v.summary,
+						explanation:v.explanation,
+						patch_preview:v.patch_preview
+					};
+					setText('#planVariantDetail', fmt(detail));
+				};
+				box.appendChild(btn);
+			});
 		}
 		async function runPlan(){
 			const body = {
@@ -110,8 +222,14 @@
 				context: $('#planContext').value,
 				target_paths: $('#planTargets').value.split(',').map(s=>s.trim()).filter(Boolean)
 			};
-			const r = await api('/plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+			const rb = $('#riskBudget').value;
+			const url = rb? `/plan?risk_budget=${encodeURIComponent(rb)}` : '/plan';
+			const r = await api(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
 			setText('#planOut', fmt(r));
+			renderVariants(r);
+			if(r.variants && r.variants[0]){
+				setText('#planVariantDetail', fmt(r.variants[0]));
+			}
 		}
 		async function runChat(){
 			const body={messages:[{role:'user', content: $('#chatPrompt').value}]};
@@ -125,9 +243,17 @@
 			const key=$('#apiKey').value.trim();
 			evtSrc = new EventSource('/events?token='+encodeURIComponent(key));
 			evtSrc.onopen=()=>$('#eventsState').textContent='events: open';
-			evtSrc.onmessage=e=>{ const pre=$('#eventsOut'); pre.textContent += '\n'+e.data; pre.scrollTop=pre.scrollHeight; };
+			evtSrc.onmessage=e=>{ 
+				const pre=$('#eventsOut'); 
+				let filter=$('#eventsFilter').value.trim();
+				if(filter){
+					try{const re=new RegExp(filter,'i'); if(!re.test(e.data)) return;}catch{}
+				}
+				pre.textContent += '\n'+e.data; pre.scrollTop=pre.scrollHeight; 
+			};
 			evtSrc.onerror=()=>$('#eventsState').textContent='events: error';
 		}
+		$('#btnFilterClear').onclick=()=>{ $('#eventsFilter').value=''; };
 		async function loadMetrics(){
 			$('#metricsState').textContent='metrics: loading';
 			const key=$('#apiKey').value.trim();
@@ -143,10 +269,152 @@
 		$('#btnChat').onclick=runChat;
 		$('#btnEvents').onclick=startEvents;
 		$('#btnMetrics').onclick=loadMetrics;
-
+		$('#btnIdleState').onclick=loadIdleState;
+		$('#btnIdleTick').onclick=runIdleTick;
+		$('#btnPolicyLoad').onclick=loadPolicy;
+		$('#btnPolicyValidate').onclick=validatePolicy;
+		$('#btnPolicyApply').onclick=applyPolicy;
+		$('#btnSuggestGen').onclick=genSuggest;
+		$('#btnSuggestLoad').onclick=loadSuggest;
+		$('#btnSuggestApprove').onclick=approveSuggest;
+		$('#btnSuggestRevise').onclick=reviseSuggest;
+        // new suggestion feature buttons
+        const btnList = document.getElementById('btnSuggestList');
+        const btnRefine = document.getElementById('btnSuggestRefine');
+        const btnDownload = document.getElementById('btnSuggestDownload');
+        const btnCopyPatch = document.getElementById('btnSuggestCopyPatch');
+        if(btnList) btnList.onclick=refreshSuggestList;
+        if(btnRefine) btnRefine.onclick=refineSuggest;
+        if(btnDownload) btnDownload.onclick=downloadSuggest;
+        if(btnCopyPatch) btnCopyPatch.onclick=copySuggestPatch;
 		// initial
+		loadStoredKey();
 		loadMeta();
 		loadLLM();
+		async function loadIdleState(){
+			const r = await api('/game/idle/state');
+			setText('#idleOut', fmt(r));
+			if(r.state){$('#idleInfo').textContent='tick: '+r.state.tick+' res:'+r.state.resources;}
+		}
+		async function runIdleTick(){
+			const r = await api('/game/idle/tick',{method:'POST'});
+			setText('#idleOut', fmt(r));
+			if(r.state){$('#idleInfo').textContent='tick: '+r.state.tick+' res:'+r.state.resources;}
+		}
+		async function loadPolicy(){
+			const r = await api('/policy/current');
+			setText('#policyOut', fmt(r));
+			if(r.policy){ $('#policyContent').value = jsyaml.dump(r.policy); $('#policyStatus').textContent='policy: loaded'; setText('#badgePolicy','policy: loaded'); setBadge($('#badgePolicy'), true);} else { setText('#badgePolicy','policy: none'); setBadge($('#badgePolicy'), false); }
+		}
+		async function validatePolicy(){
+			const content = $('#policyContent').value;
+			const body = {content, dry_run:true};
+			const r = await api('/policy/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+			setText('#policyOut', fmt(r));
+			$('#policyStatus').textContent = r.status==='validated'? 'policy: valid':'policy: ?'; if(r.status==='validated'){ setText('#badgePolicy','policy: valid'); setBadge($('#badgePolicy'), true);} else { setBadge($('#badgePolicy'), false); }
+		}
+		async function applyPolicy(){
+			const content = $('#policyContent').value;
+			const body = {content, dry_run:false};
+			const r = await api('/policy/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+			setText('#policyOut', fmt(r));
+			$('#policyStatus').textContent = r.status==='applied'? 'policy: applied':'policy: ?'; if(r.status==='applied'){ setText('#badgePolicy','policy: applied'); setBadge($('#badgePolicy'), true);} else { setBadge($('#badgePolicy'), false); }
+		}
+		async function genSuggest(){
+			const goal=$('#suggestGoal').value.trim();
+			const focus=$('#suggestFocus').value.split(',').map(s=>s.trim()).filter(Boolean);
+			const body={goal, focus_paths:focus.length?focus:undefined};
+			const r=await api('/suggest/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+			setText('#suggestOut', fmt(r));
+			if(r.id) $('#suggestId').value=r.id;
+		}
+		async function loadSuggest(){
+			const id=$('#suggestId').value.trim(); if(!id) return;
+			const r=await api('/suggest/review?id='+encodeURIComponent(id));
+			setText('#suggestOut', fmt(r));
+		}
+		async function approveSuggest(){
+			const id=$('#suggestId').value.trim(); if(!id) return;
+			const body={id, approve:true};
+			const r=await api('/suggest/review',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+			setText('#suggestOut', fmt(r));
+			if(r.suggestion && r.suggestion.id) $('#suggestId').value=r.suggestion.id;
+		}
+		async function reviseSuggest(){
+			const id=$('#suggestId').value.trim(); if(!id) return;
+			const adjustments=$('#suggestAdjust').value;
+			const body={id, approve:false, adjustments};
+			const r=await api('/suggest/review',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+			setText('#suggestOut', fmt(r));
+			if(r.suggestion && r.suggestion.id) $('#suggestId').value=r.suggestion.id;
+		}
+        async function refreshSuggestList(){
+            const r = await api('/suggest/list?limit=50');
+            const box = document.getElementById('suggestList');
+            if(!box) return;
+            if(!r.items || !r.items.length){ box.innerHTML='<em style="color:#667">Keine Einträge.</em>'; return; }
+            box.innerHTML='';
+            r.items.forEach(it=>{
+                const row=document.createElement('button');
+                row.className='secondary';
+                row.style.display='flex';
+                row.style.justifyContent='space-between';
+                row.style.width='100%';
+                row.textContent = `${it.id} · ${it.status}`;
+                row.onclick=()=>{ document.getElementById('suggestId').value=it.id; loadSuggest(); };
+                box.appendChild(row);
+            });
+            if(typeof r.open_count==='number') updateOpenBadge(r.open_count);
+        }
+        function updateOpenBadge(n){
+            const b=document.getElementById('suggestOpenBadge');
+            if(!b) return; b.textContent='open: '+n; b.style.background = n>0? '#3a2f13':'#1f3b2b'; b.style.color = n>0? '#facc15':'#6ee7b7';
+        }
+        async function refineSuggest(){
+            const id=document.getElementById('suggestId').value.trim(); if(!id) return;
+            const instructions=document.getElementById('suggestAdjust').value.trim();
+            const body={id,instructions:instructions||undefined};
+            const r=await api('/suggest/llm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+            setText('#suggestOut', fmt(r));
+            if(r.suggestion && r.suggestion.id) document.getElementById('suggestId').value=r.suggestion.id;
+            if(r.suggestion && r.suggestion.potential_patches){ renderPatch(r.suggestion.potential_patches); }
+        }
+        function renderPatch(patches){
+            const pre=document.getElementById('suggestPatchOut'); if(!pre) return;
+            if(!patches || !patches.length){ pre.textContent='(no patches)'; return; }
+            // simple highlight additions/deletions
+            const lines=[];
+            patches.forEach(p=>{
+                (p.diff||'').split(/\n/).forEach(l=>{
+                    if(l.startsWith('+')) lines.push('%c'+l,'color:#4ade80');
+                    else if(l.startsWith('-')) lines.push('%c'+l,'color:#f87171');
+                    else lines.push('%c'+l,'color:#9fbcd9');
+                });
+            });
+            pre.textContent = patches.map(p=>p.diff).join('\n\n');
+        }
+        async function downloadSuggest(){
+            const id=document.getElementById('suggestId').value.trim(); if(!id) return;
+            const r=await api('/suggest/review?id='+encodeURIComponent(id));
+            const blob=new Blob([JSON.stringify(r,null,2)],{type:'application/json'});
+            const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='suggestion-'+id+'.json'; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1500);
+        }
+        async function copySuggestPatch(){
+            const pre=document.getElementById('suggestPatchOut'); if(!pre) return; const txt=pre.textContent; if(!txt.trim()) return;
+            try{ await navigator.clipboard.writeText(txt); }catch{}
+        }
+        // extend events stream for open count updates
+        const origOnMessage = startEvents;
+        // monkey patch not necessary; we append logic inside SSE handler by wrapping after definition
+        const _startEvents=startEvents; startEvents=function(){
+            _startEvents();
+            if(evtSrc){
+                const origHandler=evtSrc.onmessage; evtSrc.onmessage=e=>{
+                    if(origHandler) origHandler(e);
+                    try{ if(e.data.includes('suggest.open')){ const m=e.data.match(/open_count=(\d+)/); if(m) updateOpenBadge(parseInt(m[1])); } }catch{}
+                };
+            }
+        };
 	</script>
 </body>
 </html>

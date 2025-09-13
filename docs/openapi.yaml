@@ -225,11 +225,81 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /policy/current:
+    get:
+      summary: Policy Current
+      operationId: policy_current_policy_current_get
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                title: Response Policy Current Policy Current Get
+                additionalProperties: true
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /policy/apply:
+    post:
+      summary: Policy Apply
+      operationId: policy_apply_policy_apply_post
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PolicyApplyRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                title: Response Policy Apply Policy Apply Post
+                additionalProperties: true
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /plan:
     post:
       summary: Plan
       operationId: plan_plan_post
       parameters:
+      - name: risk_budget
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Risk Budget
       - name: X-API-Key
         in: header
         required: false
@@ -250,9 +320,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                title: Response Plan Plan Post
-                additionalProperties: true
+                $ref: '#/components/schemas/PlanResponse'
         '422':
           description: Validation Error
           content:
@@ -323,6 +391,255 @@ paths:
                 type: object
                 title: Response Llm Status Llm Status Get
                 additionalProperties: true
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /game/idle/state:
+    get:
+      summary: Idle Get State
+      operationId: idle_get_state_game_idle_state_get
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                title: Response Idle Get State Game Idle State Get
+                additionalProperties: true
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /game/idle/tick:
+    post:
+      summary: Idle Tick
+      operationId: idle_tick_game_idle_tick_post
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                title: Response Idle Tick Game Idle Tick Post
+                additionalProperties: true
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /env/info:
+    get:
+      summary: Env Info
+      operationId: env_info_env_info_get
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnvInfoResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /suggest/generate:
+    post:
+      summary: Suggest Generate
+      operationId: suggest_generate_suggest_generate_post
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SuggestGenerateRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Suggestion'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /suggest/review:
+    get:
+      summary: Suggest Review Get
+      operationId: suggest_review_get_suggest_review_get
+      parameters:
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+          title: Id
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Suggestion'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    post:
+      summary: Suggest Review Post
+      operationId: suggest_review_post_suggest_review_post
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SuggestReviewRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuggestReviewResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /suggest/list:
+    get:
+      summary: Suggest List
+      operationId: suggest_list_suggest_list_get
+      parameters:
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 50
+          title: Limit
+      - name: full
+        in: query
+        required: false
+        schema:
+          type: boolean
+          default: false
+          title: Full
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuggestListResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /suggest/llm:
+    post:
+      summary: Suggest Llm
+      operationId: suggest_llm_suggest_llm_post
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SuggestLLMRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuggestLLMResponse'
         '422':
           description: Validation Error
           content:
@@ -406,6 +723,37 @@ components:
       - model
       - content
       title: ChatResponse
+    EnvInfoResponse:
+      properties:
+        version:
+          type: string
+          title: Version
+        file_count:
+          type: integer
+          title: File Count
+        files:
+          items:
+            type: object
+          type: array
+          title: Files
+        env:
+          type: object
+          title: Env
+        python:
+          type: object
+          title: Python
+        metrics:
+          type: object
+          title: Metrics
+      type: object
+      required:
+      - version
+      - file_count
+      - files
+      - env
+      - python
+      - metrics
+      title: EnvInfoResponse
     HTTPValidationError:
       properties:
         detail:
@@ -448,6 +796,270 @@ components:
           title: Target Paths
       type: object
       title: PlanRequest
+    PlanResponse:
+      properties:
+        status:
+          type: string
+          title: Status
+        artifact:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Artifact
+        applied_policies:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: Applied Policies
+        variants:
+          items:
+            $ref: '#/components/schemas/PlanVariant'
+          type: array
+          title: Variants
+      type: object
+      required:
+      - status
+      - variants
+      title: PlanResponse
+    PlanVariant:
+      properties:
+        id:
+          type: string
+          title: Id
+        label:
+          type: string
+          title: Label
+        risk_level:
+          type: string
+          title: Risk Level
+        knobs:
+          type: object
+          title: Knobs
+        summary:
+          type: string
+          title: Summary
+        explanation:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Explanation
+        patch_preview:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Patch Preview
+      type: object
+      required:
+      - id
+      - label
+      - risk_level
+      - knobs
+      - summary
+      title: PlanVariant
+    PolicyApplyRequest:
+      properties:
+        content:
+          type: string
+          title: Content
+        dry_run:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Dry Run
+          default: false
+      type: object
+      required:
+      - content
+      title: PolicyApplyRequest
+    SuggestGenerateRequest:
+      properties:
+        goal:
+          type: string
+          title: Goal
+        focus_paths:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: Focus Paths
+      type: object
+      required:
+      - goal
+      title: SuggestGenerateRequest
+    SuggestLLMRequest:
+      properties:
+        id:
+          type: string
+          title: Id
+        instruction:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Instruction
+      type: object
+      required:
+      - id
+      title: SuggestLLMRequest
+    SuggestLLMResponse:
+      properties:
+        suggestion:
+          $ref: '#/components/schemas/Suggestion'
+        refined:
+          type: boolean
+          title: Refined
+      type: object
+      required:
+      - suggestion
+      - refined
+      title: SuggestLLMResponse
+    SuggestListItem:
+      properties:
+        id:
+          type: string
+          title: Id
+        status:
+          type: string
+          title: Status
+        goal:
+          type: string
+          title: Goal
+        created_at:
+          type: number
+          title: Created At
+        weaknesses:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: Weaknesses
+      type: object
+      required:
+      - id
+      - status
+      - goal
+      - created_at
+      title: SuggestListItem
+    SuggestListResponse:
+      properties:
+        total:
+          type: integer
+          title: Total
+        open:
+          type: integer
+          title: Open
+        items:
+          items:
+            $ref: '#/components/schemas/SuggestListItem'
+          type: array
+          title: Items
+      type: object
+      required:
+      - total
+      - open
+      - items
+      title: SuggestListResponse
+    SuggestReviewRequest:
+      properties:
+        id:
+          type: string
+          title: Id
+        approve:
+          type: boolean
+          title: Approve
+        adjustments:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Adjustments
+      type: object
+      required:
+      - id
+      - approve
+      title: SuggestReviewRequest
+    SuggestReviewResponse:
+      properties:
+        suggestion:
+          $ref: '#/components/schemas/Suggestion'
+        revised:
+          type: boolean
+          title: Revised
+      type: object
+      required:
+      - suggestion
+      - revised
+      title: SuggestReviewResponse
+    Suggestion:
+      properties:
+        id:
+          type: string
+          title: Id
+        created_at:
+          type: number
+          title: Created At
+        status:
+          type: string
+          title: Status
+        goal:
+          type: string
+          title: Goal
+        focus_paths:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: Focus Paths
+        summary:
+          type: string
+          title: Summary
+        rationale:
+          type: string
+          title: Rationale
+        recommended_steps:
+          items:
+            type: string
+          type: array
+          title: Recommended Steps
+        potential_patches:
+          items:
+            type: object
+          type: array
+          title: Potential Patches
+        risk_notes:
+          items:
+            type: string
+          type: array
+          title: Risk Notes
+        weaknesses:
+          items:
+            type: string
+          type: array
+          title: Weaknesses
+          default: []
+        metrics_impact:
+          type: object
+          title: Metrics Impact
+        version:
+          type: string
+          title: Version
+          default: '1'
+      type: object
+      required:
+      - id
+      - created_at
+      - status
+      - goal
+      - summary
+      - rationale
+      - recommended_steps
+      - potential_patches
+      - risk_notes
+      - metrics_impact
+      title: Suggestion
     TurnRequest:
       properties:
         agent_id:

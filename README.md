@@ -34,6 +34,9 @@ Exported at `/metrics`:
 - `policy_denied_total{reason}`
 - `plan_seconds` (Histogram)
 - `act_seconds{kind}` (Histogram)
+- `suggestions_generated_total`
+- `suggestions_review_total{action}` (approve|revise)
+- `suggestions_open_total` (Gauge – aktuell offene Vorschläge)
 
 ## SSE
 `GET /events` emits events + `retry:` hint and `:keepalive` comment every 15s.
@@ -199,5 +202,72 @@ All handled errors unify as:
 - JWT-based auth alternative.
 - Structured metrics label reduction for cardinality control.
 - Background task queue for heavier `/turn` logic.
+
+## Operational Alerts (Prometheus Beispiele)
+
+Beispiel-Regeln (Prometheus `rules.yml` Ausschnitt) zur Überwachung des Suggestion-Lebenszyklus & Policy Gate:
+
+```
+groups:
+	- name: life_agent_core
+		rules:
+			- alert: VieleOffeneVorschlaege
+				expr: suggestions_open_total > 10
+				for: 5m
+				labels:
+					severity: warning
+				annotations:
+					summary: Zu viele offene Vorschläge (>10)
+					description: Bitte Vorschläge prüfen und genehmigen oder schließen.
+
+			- alert: StauInReview
+				expr: (suggestions_open_total > 0) and on() (rate(suggestions_review_total{action="approve"}[30m]) < 0.1)
+				for: 30m
+				labels:
+					severity: warning
+				annotations:
+					summary: Kaum Freigaben
+					description: Offene Vorschläge werden nicht genehmigt (Approve-Rate <0.1 / 30m).
+
+			- alert: PolicyDenialsSpike
+				expr: increase(policy_denied_total[10m]) > 5
+				for: 2m
+				labels:
+					severity: critical
+				annotations:
+					summary: Policy Denials Spike
+					description: Mehr als 5 Policy-Verweigerungen in 10 Minuten – mögliche Fehlkonfiguration oder Angriff.
+
+			- alert: LLMFehlt
+				expr: absent(llm_requests_total)
+				for: 15m
+				labels:
+					severity: info
+				annotations:
+					summary: Keine LLM Nutzung
+					description: Noch kein LLM aktiv (oder Metrik fehlt). Optional – nur zur Sichtbarkeit.
+
+	- name: performance
+		rules:
+			- alert: LangsamePlanerstellung
+				expr: histogram_quantile(0.95, sum(rate(plan_seconds_bucket[5m])) by (le)) > 3
+				for: 10m
+				labels:
+					severity: warning
+				annotations:
+					summary: 95%-Latenz der Planerstellung hoch
+					description: P95 von /plan > 3s (letzte 5m). Prüfe LLM / IO.
+```
+
+Hinweise:
+- `suggestions_open_total` wird bei jeder Änderung (Generate, Revise, Approve) aktualisiert und via SSE Event `suggest.open` gespiegelt (`open_count=<n>`).
+- Für Alertmanager kann ein Route basierend auf `severity` eingerichtet werden.
+- Diff / Patch Inhalte bewusst nicht in Metrics – lieber über Artefakte & Repos prüfen.
+
+Dashboards (Grafana) – empfohlene Panels:
+- Current Open Suggestions (Gauge)
+- Approvals vs Revisions (stacked rate)
+- Plan Duration P95
+- Policy Denials (rate)
 
 

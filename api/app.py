@@ -21,6 +21,7 @@ from fastapi.security import APIKeyHeader, HTTPBearer, HTTPAuthorizationCredenti
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from prometheus_client import Counter, Histogram, CollectorRegistry, generate_latest, CONTENT_TYPE_LATEST  # type: ignore
+from prometheus_client import Gauge  # type: ignore
 import yaml
 from policy.loader import load_policy
 from policy.model import Policy
@@ -217,6 +218,11 @@ PLAN_SECONDS = Histogram("plan_seconds", "Plan endpoint latency (s)", registry=R
 ACT_SECONDS = Histogram("act_seconds", "Act/Turn latency (s)", ["kind"], registry=REGISTRY)
 LLM_REQUESTS_TOTAL = Counter("llm_requests_total", "LLM chat request count", ["model"], registry=REGISTRY)
 LLM_TOKENS_TOTAL = Counter("llm_tokens_total", "LLM tokens (prompt/completion/total)", ["type"], registry=REGISTRY)
+IDLE_TICKS_TOTAL = Counter("idle_ticks_total", "Idle game tick count", registry=REGISTRY)
+ENV_INFO_TOTAL = Counter("env_info_total", "Environment info requests", registry=REGISTRY)
+SUGGEST_GENERATED_TOTAL = Counter("suggestions_generated_total", "Suggestions generated", registry=REGISTRY)
+SUGGEST_REVIEW_TOTAL = Counter("suggestions_review_total", "Suggestion review actions", ["action"], registry=REGISTRY)
+SUGGEST_OPEN_GAUGE = Gauge("suggestions_open_total", "Open (draft/revised) suggestions", registry=REGISTRY)
 
 RISK_PATTERNS = [r"\b(os\.system|subprocess\.)", r"\.\./", r"/etc/passwd", r"\b(?:ssh|https?|ftp)://", r"(?i)api[_-]?key", r"(?i)\b(token|secret)\b"]
 
@@ -246,6 +252,21 @@ class PlanRequest(BaseModel):
             "targets": self.target_paths or self.target_files or [],
         }
 
+class PlanVariant(BaseModel):
+    id: str
+    label: str
+    risk_level: str
+    knobs: dict[str, Any]
+    summary: str
+    explanation: str | None = None
+    patch_preview: str | None = None
+
+class PlanResponse(BaseModel):
+    status: str
+    artifact: str | None = None
+    applied_policies: list[str] | None = None
+    variants: list[PlanVariant]
+
 class ChatMessage(BaseModel):
     role: str
     content: str
@@ -260,6 +281,62 @@ class ChatResponse(BaseModel):
     model: str
     content: str
     usage: dict[str, Any] | None = None
+
+class EnvInfoResponse(BaseModel):
+    version: str
+    file_count: int
+    files: list[dict[str, Any]]
+    env: dict[str, Any]
+    python: dict[str, Any]
+    metrics: dict[str, Any]
+
+class SuggestGenerateRequest(BaseModel):
+    goal: str
+    focus_paths: list[str] | None = None
+
+class Suggestion(BaseModel):
+    id: str
+    created_at: float
+    status: str
+    goal: str
+    focus_paths: list[str] | None = None
+    summary: str
+    rationale: str
+    recommended_steps: list[str]
+    potential_patches: list[dict[str, Any]]
+    risk_notes: list[str]
+    weaknesses: list[str] = []
+    metrics_impact: dict[str, Any]
+    version: str = "1"
+
+class SuggestReviewRequest(BaseModel):
+    id: str
+    approve: bool
+    adjustments: str | None = None
+
+class SuggestReviewResponse(BaseModel):
+    suggestion: Suggestion
+    revised: bool
+
+class SuggestListItem(BaseModel):
+    id: str
+    status: str
+    goal: str
+    created_at: float
+    weaknesses: list[str] | None = None
+
+class SuggestListResponse(BaseModel):
+    total: int
+    open: int
+    items: list[SuggestListItem]
+
+class SuggestLLMRequest(BaseModel):
+    id: str
+    instruction: str | None = None
+
+class SuggestLLMResponse(BaseModel):
+    suggestion: Suggestion
+    refined: bool
 
 # ---------------- Database ----------------
 def init_db() -> None:
@@ -530,6 +607,52 @@ async def policy_reload(agent: str = Depends(require_auth), path: str | None = B
     await emit_event("policy.reload", {"loaded_at": policies["loaded_at"], "rules": len(policies['rules'])})
     return {"status": "reloaded", "loaded_at": policies["loaded_at"], "rule_count": len(policies['rules'])}
 
+@app.get("/policy/current")
+async def policy_current(agent: str = Depends(require_auth)) -> dict[str, Any]:
+    rate_limit(agent)
+    # Provide serialized policy + legacy aggregated rules meta
+    pol = None
+    try:
+        if current_policy:
+            pol = current_policy.model_dump()
+    except Exception:
+        pol = None
+    return {"policy": pol, "rules_count": len(policies.get('rules', [])), "loaded_at": policies.get('loaded_at')}
+
+class PolicyApplyRequest(BaseModel):
+    content: str
+    dry_run: bool | None = False
+
+@app.post("/policy/apply")
+async def policy_apply(req: PolicyApplyRequest, agent: str = Depends(require_auth)) -> dict[str, Any]:
+    rate_limit(agent)
+    import yaml as _yaml
+    try:
+        data = _yaml.safe_load(req.content) or {}
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail={"code": "yaml_parse_error", "message": str(e)})
+    from policy.model import Policy as _Pol
+    try:
+        new_pol = _Pol.model_validate(data)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail={"code": "policy_invalid", "message": str(e)})
+    if req.dry_run:
+        return {"status": "validated", "dry_run": True, "policy": new_pol.model_dump()}
+    # Persist to policies/policy.yaml
+    os.makedirs(POLICY_DIR, exist_ok=True)
+    target_path = os.path.join(POLICY_DIR, "policy.yaml")
+    with open(target_path, "w", encoding="utf-8") as f:
+        f.write(req.content if req.content.endswith("\n") else req.content + "\n")
+    # Reload
+    try:
+        global current_policy
+        current_policy = new_pol
+    except Exception:
+        pass
+    policies['loaded_at'] = time.time()
+    await emit_event("policy.apply", {"path": target_path, "version": getattr(new_pol, 'version', None)})
+    return {"status": "applied", "path": target_path, "policy": new_pol.model_dump()}
+
 # helper enforcement
 
 def risk_gate(text: str):
@@ -545,9 +668,9 @@ def enforce_whitelist(paths: list[str], allowed_dirs: list[str]):
             raise HTTPException(status_code=403, detail={"code": "path_forbidden", "path": p})
 
 
-@app.post("/plan")
+@app.post("/plan", response_model=PlanResponse)
 @observer("plan")
-async def plan(req: PlanRequest, agent: str = Depends(require_auth)) -> dict[str, Any]:
+async def plan(req: PlanRequest, agent: str = Depends(require_auth), risk_budget: str | None = Query(default=None)) -> PlanResponse:  # type: ignore[override]
     rate_limit(agent)
     norm = req.normalized()
     logger.info("plan request intent=%s targets=%d", norm['intent'], len(norm['targets']))
@@ -577,7 +700,56 @@ async def plan(req: PlanRequest, agent: str = Depends(require_auth)) -> dict[str
         except Exception:
             pass
     await emit_event("plan.created", {"file": plan_filename})
-    return {"status": "created", "artifact": plan_filename, "applied_policies": artifact['policies']}
+
+    # Heuristic variant generation (placeholder until Groq integration for variants)
+    base_intent = norm['intent'] or 'plan'
+    rb = (risk_budget or 'balanced').lower()
+    variant_specs = [
+        {"id": "v_safe", "label": "Vorsichtig", "risk_level": "vorsichtig", "temperature": 0.0, "depth_limit": 3, "risk_budget": "low"},
+        {"id": "v_bal", "label": "Balanciert", "risk_level": "balanciert", "temperature": 0.0, "depth_limit": 5, "risk_budget": "medium"},
+        {"id": "v_bold", "label": "Mutig", "risk_level": "mutig", "temperature": 0.2, "depth_limit": 8, "risk_budget": "high"},
+    ]
+    # Reorder to emphasize requested risk_budget first if provided
+    if rb in ("low","medium","high"):
+        priority = {"low":0, "medium":1, "high":2}
+        variant_specs.sort(key=lambda v: priority.get(v['risk_budget'], 99) + (0 if v['risk_budget']==rb else 10))
+
+    variants: list[PlanVariant] = []
+    for spec in variant_specs:
+        summary = f"{spec['label']} Variante für '{base_intent}' mit Tiefe {spec['depth_limit']}"
+        explanation = (
+            "Konservativer Ansatz mit minimalem Risiko." if spec['risk_budget']=="low" else
+            ("Ausgewogene Änderungen mit moderatem Umfang." if spec['risk_budget']=="medium" else "Aggressivere Variante mit erweiterten Änderungen.")
+        )
+        patch_preview = None
+        try:
+            # simple illustrative patch preview (no real diff yet)
+            target_preview = (targets[0] if targets else 'README.md')
+            patch_preview = (
+                f"--- a/{target_preview}\n+++ b/{target_preview}\n@@\n-// TODO old\n+// {spec['label']} plan update placeholder\n"
+            )
+        except Exception:
+            pass
+        variants.append(PlanVariant(
+            id=spec['id'],
+            label=spec['label'],
+            risk_level=spec['risk_level'],
+            knobs={
+                "temperature": spec['temperature'],
+                "risk_budget": spec['risk_budget'],
+                "depth_limit": spec['depth_limit'],
+            },
+            summary=summary,
+            explanation=explanation,
+            patch_preview=patch_preview,
+        ))
+
+    return PlanResponse(
+        status="created",
+        artifact=plan_filename,
+        applied_policies=artifact['policies'],
+        variants=variants,
+    )
 
 @app.get("/")
 async def root() -> RedirectResponse:
@@ -678,6 +850,297 @@ async def llm_status(agent: str = Depends(require_auth)) -> dict[str, Any]:
     except Exception:
         pass
     return {"configured": bool(key), "prefix": (key[:8] + '***') if key else None, "model_default": model_default}
+
+# ---------------- Idle Game Plugin -----------------
+idle_state: dict[str, Any] = {
+    "tick": 0,
+    "resources": 0,
+    "rules_version": 1,
+}
+
+@app.get("/game/idle/state")
+async def idle_get_state(agent: str = Depends(require_auth)) -> dict[str, Any]:
+    rate_limit(agent)
+    return {"state": idle_state}
+
+@app.post("/game/idle/tick")
+async def idle_tick(agent: str = Depends(require_auth)) -> dict[str, Any]:
+    rate_limit(agent)
+    idle_state["tick"] += 1
+    # simple resource accumulation
+    gained = 1 + (1 if idle_state["tick"] % 5 == 0 else 0)
+    idle_state["resources"] += gained
+    proposal: dict[str, Any] | None = None
+    # every 7 ticks propose a tiny rule mutation as a 'plan variant' conceptually
+    if idle_state["tick"] % 7 == 0:
+        idle_state["rules_version"] += 1
+        proposal = {
+            "id": f"idle_rule_{idle_state['rules_version']}",
+            "summary": "Increase passive gain",
+            "patch_preview": "--- a/plugins/games/idle/rules.yaml\n+++ b/plugins/games/idle/rules.yaml\n@@\n-passive_gain: 1\n+passive_gain: 2\n",
+        }
+    evt_payload: dict[str, Any] = {"tick": idle_state["tick"], "resources": idle_state["resources"], "proposal": bool(proposal)}
+    IDLE_TICKS_TOTAL.inc()
+    await emit_event("idle.tick", evt_payload)
+    return {"state": idle_state, "gained": gained, "proposal": proposal}
+
+# ---------------- Environment & Suggestions -----------------
+SAFE_ENV_KEYS = {"APP_VERSION","KILL_SWITCH","PUBLIC_SERVER_URL"}
+EXCLUDE_DIRS = {".git","__pycache__","node_modules",".venv","venv"}
+
+def _scan_files(limit: int = 200) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for root, dirs, files in os.walk('.'):
+        # prune dirs
+        dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS]
+        for fn in files:
+            if len(out) >= limit:
+                return out
+            p = os.path.join(root, fn).replace('..','')
+            try:
+                st = os.stat(p)
+                out.append({"path": p.lstrip('./'), "size": st.st_size})
+            except Exception:
+                continue
+    return out
+
+@app.get("/env/info", response_model=EnvInfoResponse)
+async def env_info(agent: str = Depends(require_auth)) -> EnvInfoResponse:  # type: ignore[override]
+    rate_limit(agent)
+    files = _scan_files()
+    env_filtered = {k: os.getenv(k) for k in SAFE_ENV_KEYS if os.getenv(k) is not None}
+    import platform, sys
+    py = {"version": platform.python_version(), "executable": sys.executable.split(os.sep)[-1]}
+    # simple metrics snapshot
+    metrics = {"actions_total": None, "plans": None}
+    try:
+        metrics["actions_total"] = sum(int(s.samples[0].value) for s in ACTIONS_TOTAL.collect())  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    ENV_INFO_TOTAL.inc()
+    payload = EnvInfoResponse(
+        version=app.version,
+        file_count=len(files),
+        files=files,
+        env=env_filtered,
+        python=py,
+        metrics=metrics,
+    )
+    await emit_event("env.info", {"files": payload.file_count})
+    return payload
+
+SUGGEST_DIR = "suggestions"
+os.makedirs(SUGGEST_DIR, exist_ok=True)
+
+def _suggestion_path(sid: str) -> str:
+    return os.path.join(SUGGEST_DIR, f"{sid}.json")
+
+def _save_suggestion(s: Suggestion) -> None:
+    try:
+        with open(_suggestion_path(s.id), 'w', encoding='utf-8') as f:
+            json.dump(s.model_dump(), f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+def _load_suggestion(sid: str) -> Suggestion | None:
+    try:
+        with open(_suggestion_path(sid), 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return Suggestion.model_validate(data)
+    except Exception:
+        return None
+
+def _iter_suggestions() -> list[Suggestion]:
+    items: list[Suggestion] = []
+    try:
+        for fn in os.listdir(SUGGEST_DIR):
+            if not fn.endswith('.json'): continue
+            s = _load_suggestion(fn[:-5])
+            if s: items.append(s)
+    except Exception:
+        pass
+    return items
+
+def update_open_gauge() -> None:
+    items = _iter_suggestions()
+    open_count = sum(1 for s in items if s.status in ("draft","revised"))
+    try:
+        SUGGEST_OPEN_GAUGE.set(open_count)
+    except Exception:
+        pass
+    # fire event asynchronously (best-effort)
+    try:
+        asyncio.create_task(emit_event("suggest.open", {"open": open_count}))
+    except Exception:
+        pass
+
+@app.post("/suggest/generate", response_model=Suggestion)
+async def suggest_generate(req: SuggestGenerateRequest, agent: str = Depends(require_auth)) -> Suggestion:  # type: ignore[override]
+    rate_limit(agent)
+    # gather env snapshot (reuse scan lightly to avoid heavy call each time)
+    files = _scan_files(limit=80)
+    ts = time.time()
+    sid = f"sug_{int(ts)}_{abs(hash(req.goal))%10000}"
+    steps: list[str] = []
+    rationale: list[str] = []
+    weaknesses: list[str] = []
+    # heuristic: recommend tests, docs, metrics based on existing dirs
+    file_paths = [f['path'] for f in files]
+    if not any(p.startswith('tests') for p in file_paths):
+        steps.append("Add initial pytest suite (smoke tests for /plan and /env/info)")
+        rationale.append("Keine tests/ Ordner gefunden → Grundabdeckung fehlt.")
+        weaknesses.append("Fehlende Testabdeckung kann Regressionen unbemerkt lassen.")
+    if 'README.md' in file_paths:
+        steps.append("Erweitere README mit Abschnitt 'Vorschlags-Workflow'")
+        rationale.append("README vorhanden, neuer Workflow dokumentieren.")
+    else:
+        weaknesses.append("README.md fehlt – Einstieg für neue Nutzer erschwert.")
+    steps.append("UI Panel 'Suggestions' hinzufügen (Liste + Detail + Approve/Revise)")
+    steps.append("Prometheus Gauge für offene Vorschläge anlegen")
+    weaknesses.append("Keine Kennzahl für offene Vorschläge → Fortschritt schwer messbar.")
+    patches = []
+    if req.focus_paths:
+        for p in req.focus_paths[:5]:
+            patches.append({
+                "target": p,
+                "diff": f"--- a/{p}\n+++ b/{p}\n@@\n// Vorschlag Placeholder für {req.goal}\n",
+            })
+    suggestion = Suggestion(
+        id=sid,
+        created_at=ts,
+        status="draft",
+        goal=req.goal,
+        focus_paths=req.focus_paths,
+        summary=f"Vorschlag für Ziel: {req.goal}",
+        rationale="\n".join(rationale) or "Heuristische Analyse basierend auf Dateiliste.",
+        recommended_steps=steps,
+        potential_patches=patches,
+        risk_notes=["Nur Metadaten verwendet, keine geheimen ENV keys."],
+        weaknesses=weaknesses,
+        metrics_impact={"tests": "+", "docs": "+", "observability": "+"},
+    )
+    _save_suggestion(suggestion)
+    SUGGEST_GENERATED_TOTAL.inc()
+    update_open_gauge()
+    await emit_event("suggest.generated", {"id": suggestion.id})
+    return suggestion
+
+@app.get("/suggest/review", response_model=Suggestion)
+async def suggest_review_get(id: str, agent: str = Depends(require_auth)) -> Suggestion:  # type: ignore[override]
+    rate_limit(agent)
+    s = _load_suggestion(id)
+    if not s:
+        raise HTTPException(status_code=404, detail={"code": "suggest_not_found"})
+    return s
+
+@app.post("/suggest/review", response_model=SuggestReviewResponse)
+async def suggest_review_post(req: SuggestReviewRequest, agent: str = Depends(require_auth)) -> SuggestReviewResponse:  # type: ignore[override]
+    rate_limit(agent)
+    s = _load_suggestion(req.id)
+    if not s:
+        raise HTTPException(status_code=404, detail={"code": "suggest_not_found"})
+    revised = False
+    if req.approve:
+        if s.status != "approved":
+            s.status = "approved"
+            _save_suggestion(s)
+            await emit_event("suggest.approved", {"id": s.id})
+            SUGGEST_REVIEW_TOTAL.labels(action="approve").inc()
+    else:
+        # create revised copy by augmenting rationale and steps
+        revised = True
+        new_id = s.id + "_rev"
+        s = Suggestion(
+            id=new_id,
+            created_at=time.time(),
+            status="revised",
+            goal=s.goal,
+            focus_paths=s.focus_paths,
+            summary=s.summary + " (überarbeitet)",
+            rationale=(s.rationale + (f"\nAnpassung: {req.adjustments}" if req.adjustments else ""))[:4000],
+            recommended_steps=s.recommended_steps + ([f"Berücksichtige Anpassung: {req.adjustments}"] if req.adjustments else []),
+            potential_patches=s.potential_patches,
+            risk_notes=s.risk_notes,
+            metrics_impact=s.metrics_impact,
+        )
+        _save_suggestion(s)
+        await emit_event("suggest.revised", {"id": s.id})
+        SUGGEST_REVIEW_TOTAL.labels(action="revise").inc()
+    update_open_gauge()
+    return SuggestReviewResponse(suggestion=s, revised=revised)
+
+@app.get("/suggest/list", response_model=SuggestListResponse)
+async def suggest_list(limit: int = 50, full: bool = False, agent: str = Depends(require_auth)) -> SuggestListResponse:  # type: ignore[override]
+    rate_limit(agent)
+    items = _iter_suggestions()
+    items.sort(key=lambda s: s.created_at, reverse=True)
+    total = len(items)
+    open_cnt = sum(1 for s in items if s.status in ("draft","revised"))
+    view: list[SuggestListItem] = []
+    for s in items[:limit]:
+        view.append(SuggestListItem(id=s.id, status=s.status, goal=s.goal, created_at=s.created_at, weaknesses=(s.weaknesses if full else None)))
+    return SuggestListResponse(total=total, open=open_cnt, items=view)
+
+@app.post("/suggest/llm", response_model=SuggestLLMResponse)
+async def suggest_llm(req: SuggestLLMRequest, agent: str = Depends(require_auth)) -> SuggestLLMResponse:  # type: ignore[override]
+    rate_limit(agent)
+    s = _load_suggestion(req.id)
+    if not s:
+        raise HTTPException(status_code=404, detail={"code": "suggest_not_found"})
+    refined = False
+    api_key = os.getenv("GROQ_API_KEY")
+    new_summary = s.summary
+    new_rationale = s.rationale
+    if api_key:
+        try:
+            from groq import Groq
+            client = Groq(api_key=api_key)
+            prompt = (
+                f"Verbessere die folgende Vorschlags-Zusammenfassung und rationale. Ziel: {s.goal}. "
+                f"Schwächen: {', '.join(s.weaknesses or [])}. "
+                f"Anweisung: {req.instruction or 'Nutze präzisere Formulierungen, bleibe knapp.'}"
+            )
+            completion = client.chat.completions.create(
+                model=os.getenv("GROQ_MODEL","llama-3.3-70b-versatile"),
+                messages=[{"role":"system","content":"Du bist ein hilfsbereiter Assistent für Software-Refinement"},
+                          {"role":"user","content": prompt + "\n---\nSummary: " + s.summary + "\nRationale:\n" + s.rationale}],
+                temperature=0.2,
+                max_tokens=400,
+            )
+            if completion.choices:
+                txt = getattr(completion.choices[0].message, 'content', '') or ''
+                if txt:
+                    new_summary = (txt.split('\n',1)[0][:200]).strip() or new_summary
+                    new_rationale = (txt[:2000]).strip()
+                    refined = True
+        except Exception:
+            pass
+    else:
+        # Heuristic refinement
+        new_summary = (s.summary + " (präzisiert)")[:200]
+        if req.instruction:
+            new_rationale = (s.rationale + f"\nInstruktionshinweis: {req.instruction}")[:2000]
+        refined = True
+    if refined:
+        s = Suggestion(
+            id=s.id + ("_llm" if not s.id.endswith("_llm") else ""),
+            created_at=time.time(),
+            status="revised" if s.status != "approved" else s.status,
+            goal=s.goal,
+            focus_paths=s.focus_paths,
+            summary=new_summary,
+            rationale=new_rationale,
+            recommended_steps=s.recommended_steps,
+            potential_patches=s.potential_patches,
+            risk_notes=s.risk_notes,
+            weaknesses=s.weaknesses,
+            metrics_impact=s.metrics_impact,
+        )
+        _save_suggestion(s)
+        SUGGEST_REVIEW_TOTAL.labels(action="llm_refine").inc()
+        update_open_gauge()
+        await emit_event("suggest.refined", {"id": s.id})
+    return SuggestLLMResponse(suggestion=s, refined=refined)
 
 # ---------- Global Error Handlers ----------
 @app.exception_handler(HTTPException)
