@@ -528,6 +528,34 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /suggest/auto:
+    post:
+      summary: Suggest Auto
+      operationId: suggest_auto_suggest_auto_post
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Suggestion'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /suggest/generate:
     post:
       summary: Suggest Generate
@@ -806,6 +834,181 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Thought'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /story/state:
+    get:
+      summary: Story Get State
+      operationId: story_get_state_story_state_get
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StoryState'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /story/log:
+    get:
+      summary: Story Log
+      operationId: story_log_story_log_get
+      parameters:
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 50
+          title: Limit
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/StoryEvent'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /story/options:
+    get:
+      summary: Story Options
+      operationId: story_options_story_options_get
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/StoryOption'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /story/action:
+    post:
+      summary: Story Action
+      operationId: story_action_story_action_post
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StoryActionRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StoryEvent'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /story/advance:
+    post:
+      summary: Story Advance
+      operationId: story_advance_story_advance_post
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StoryEvent'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /story/options/regen:
+    post:
+      summary: Story Options Regenerate
+      operationId: story_options_regen_story_options_regen_post
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/StoryOption'
         '422':
           description: Validation Error
           content:
@@ -1398,6 +1601,128 @@ components:
       - items
       - total
       title: ThoughtStreamResponse
+    StoryOption:
+      properties:
+        id:
+          type: string
+          title: Id
+        label:
+          type: string
+          title: Label
+        rationale:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Rationale
+        risk:
+          type: integer
+          title: Risk
+        expected:
+          anyOf:
+          - type: object
+          - type: 'null'
+          title: Expected
+        tags:
+          items:
+            type: string
+          type: array
+          title: Tags
+        expires_at:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Expires At
+      type: object
+      required:
+      - id
+      - label
+      - risk
+      title: StoryOption
+    StoryEvent:
+      properties:
+        id:
+            type: string
+            title: Id
+        ts:
+            type: number
+            title: Ts
+        epoch:
+            type: integer
+            title: Epoch
+        kind:
+            type: string
+            title: Kind
+        text:
+            type: string
+            title: Text
+        mood:
+            type: string
+            title: Mood
+        deltas:
+            anyOf:
+            - type: object
+            - type: 'null'
+            title: Deltas
+        tags:
+            items:
+              type: string
+            type: array
+            title: Tags
+        option_ref:
+            anyOf:
+            - type: string
+            - type: 'null'
+            title: Option Ref
+      type: object
+      required:
+      - id
+      - ts
+      - epoch
+      - kind
+      - text
+      - mood
+      title: StoryEvent
+    StoryState:
+      properties:
+        epoch:
+          type: integer
+          title: Epoch
+        mood:
+          type: string
+          title: Mood
+        arc:
+          type: string
+          title: Arc
+        resources:
+          type: object
+          title: Resources
+        options:
+          items:
+            $ref: '#/components/schemas/StoryOption'
+          type: array
+          title: Options
+      type: object
+      required:
+      - epoch
+      - mood
+      - arc
+      - resources
+      - options
+      title: StoryState
+    StoryActionRequest:
+      properties:
+        option_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Option Id
+        free_text:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Free Text
+      type: object
+      title: StoryActionRequest
     TurnRequest:
       properties:
         agent_id:

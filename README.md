@@ -7,7 +7,7 @@ Self-Observing Life-Agent Development Environment (MVP).
 ## Kurz erklärt
 Ein kleiner Server mit UI, der Pläne baut, sich selbst beobachtet und sich per Regeln steuern lässt. In der Web-UI siehst du Meta/LLM-Infos, eine Plan-Demo, einen LLM-Chat (sparsam) sowie Live-Bereiche für Events & Metrics.
 
-Neu: Tab-basierte deutsche UI, Impact-Score für Vorschläge, Multi-Agent Memory (`agent_id`), Quest-Fortschritt, kategorisierte Gedanken (risk/opportunity/action/system/neutral) und verbesserter Diff-Viewer (Zeilennummern, Suche, Hunk-Navigation).
+Neu: Tab-basierte deutsche UI, Impact-Score für Vorschläge, Multi-Agent Memory (`agent_id`), Quest-Fortschritt, kategorisierte Gedanken (risk/opportunity/action/system/neutral), verbesserter Diff-Viewer (Zeilennummern, Suche, Hunk-Navigation) und automatische statische Verbesserungsvorschläge (`/suggest/auto`).
 
 Wichtiges auf einen Blick:
 - OpenAPI-Doku: `/docs` (Header `X-API-Key` erforderlich)
@@ -21,13 +21,37 @@ Wichtiges auf einen Blick:
 3. Einfachen Plan bauen: Panel „Plan Demo“ – Intent + Ziel-Datei (`api/app.py`) lassen – Button klicken. Varianten erscheinen (vorsichtig / ausgewogen / mutig) mit Parametern.
 4. Live überwachen: Events-Panel öffnen (SSE) – du siehst `plan.created`, Metriken abrufen (`Metrics`).
 5. Vorschlag generieren: Panel „Suggestions“ – Ziel eingeben, Generate → ID merken → optional refine (LLM) oder approve.
-6. Artefakte prüfen: JSON unter `plans/` oder `suggestions/` (Dateiname = ID). Keine direkten Code-Schreiboperationen – nur Patches.
+6. Auto-Vorschläge: Button "Auto" → statische Heuristiken erzeugen mehrere Vorschläge (keine LLM-Kosten).
+7. Artefakte prüfen: JSON unter `plans/` oder `suggestions/` (Dateiname = ID). Keine direkten Code-Schreiboperationen – nur Patches.
 
-Fertig: Du hast jetzt einen auditierten Änderungsplan + erste Verbesserungsidee im Artefakt-Verzeichnis.
+Fertig: Du hast jetzt einen auditierten Änderungsplan + erste Verbesserungsideen im Artefakt-Verzeichnis.
+
+## Automatische Statische Vorschläge (`/suggest/auto`)
+Erzeugt mehrere gruppierte Verbesserungs-Vorschläge ohne LLM durch schnelles Scannen des Repos (Limit auf eine definierte Anzahl Dateien, ignoriert z.B. `venv/`, `node_modules/`). Jeder Vorschlag erhält Tags `auto`, `static` und durchläuft denselben Lebenszyklus wie manuelle (`/suggest/generate`).
+
+Erkannte Heuristiken:
+- TODO / FIXME / HACK Aggregation → Reduktion technischer Schulden
+- Große Dateien (>= Schwellwert Zeilen) → Aufteilung / Modularisierung
+- Lange Funktionen (>= Schwellwert Zeilen) → Refactoring in Hilfsfunktionen
+- Breite Exception Handler (`except Exception:`) → Präzisere Fehlerbehandlung
+- Duplizierte Literale (Strings >=4 Wiederholungen) → Konstante / Config extrahieren
+
+Returned Structure: Liste von vollständigen `Suggestion` Objekten.
+
+Vorteile:
+- Zero-Kosten Basisanalyse vor LLM Nutzung
+- Schneller Überblick über strukturelle / hygienische Baustellen
+- Event-Integration (`suggest.generated`) & Metriken (`suggestions_generated_total`, Gauge Update)
+
+Nächste mögliche Erweiterungen:
+- Automatische Impact-Schätzung pro Auto-Vorschlag
+- Optionaler Risk-Score pro Heuristik
+- Diff-Vorschau für triviale Text-Konstanten Konsolidierung
 
 ## How-To (Aufgabenorientiert)
 - Plan-Varianten vergleichen: Nach `/plan` → Buttons der Varianten anklicken → Patch Preview / Knobs vergleichen.
 - Vorschlag verfeinern: Suggestion ID laden → Instruktion im Textfeld → „Refine (LLM)“. Fallback-Heuristik greift ohne konfiguriertes LLM.
+- Auto-Vorschläge generieren: Im Suggestion Tab "Auto" klicken → Liste aktualisiert sich; relevante prüfen und ggf. approven.
 - Policy validieren ohne Persistenz: Inhalt editieren → „Validate“ (dry_run) – bei Erfolg „Apply“.
 - Offene Vorschläge reduzieren: Liste refresh → Relevante prüfen → Approve oder Revise. Gauge `suggestions_open_total` sinkt bei Approval.
 - Export statische OpenAPI: `python ops/export_openapi.py` (optional `PUBLIC_SERVER_URL` setzen).
@@ -41,7 +65,7 @@ Wichtige Endpoints (GET/POST):
 - `/meta`, `/state`, `/events`, `/metrics`
 - `/plan`, `/act`, `/turn`
 - `/policy/current`, `/policy/apply`
-- `/suggest/generate`, `/suggest/review`, `/suggest/list`, `/suggest/llm`
+- `/suggest/auto`, `/suggest/generate`, `/suggest/review`, `/suggest/list`, `/suggest/llm`
 - `/suggest/impact` (Impact Score & Rationale eines genehmigten Vorschlags)
 - `/quest/list` (abgeleiteter Status quest:* Tags)
 - `/memory/list?agent_id=` (gefilterte Memory-Einträge pro Agent)
@@ -75,6 +99,7 @@ Artefakt-Verzeichnisse:
 - Security Gates aktiv (API Key, Regex Risk Filter, Whitelist, optional OPA Hook)
 - Plan-Varianten (safe / balanced / bold) + UI Auswahl
 - Suggestions Workflow: generate → (revise/refine) → approve – inklusive Gauge & Events
+- Automatische statische Vorschläge: `/suggest/auto` gruppiert Hygienethemen & erzeugt mehrere Vorschläge auf einmal
 - Thought Stream: Hintergrund-"Gedanken" alle 5–10s (konfigurierbar) mit Kontext (open_suggestions, idle_tick) → Events `thought.stream`, abrufbar via `/thought/stream`, manuell triggerbar `/thought/generate`.
 - Gedanken Kategorien: risk / opportunity / action / system / neutral (Heuristik) + Metrik
 - LLM Integration optional (Groq) für Chat & Suggestion Refinement
@@ -311,6 +336,7 @@ All handled errors unify as:
 4. Gedanken Kategorien: Einfache Keyword-Heuristik → Metrik Aggregation.
 5. Deutsche Tab-UI: Klarere Navigation, reduzierte kognitive Last.
 6. Diff Viewer: Zeilennummern, Farben, Hunk-Navigation, Regex Highlight.
+7. Automatische statische Vorschläge: `/suggest/auto` heuristische Hygiene-Checks.
 
 Snippets:
 ```
@@ -318,6 +344,7 @@ curl -H "X-API-Key: test" http://localhost:8000/suggest/impact?id=<ID>
 curl -H "X-API-Key: test" http://localhost:8000/memory/list?agent_id=alpha
 curl -H "X-API-Key: test" http://localhost:8000/quest/list
 curl -H "X-API-Key: test" http://localhost:8000/thought/stream?limit=10
+curl -H "X-API-Key: test" -X POST http://localhost:8000/suggest/auto
 ```
 
 ## Operational Alerts (Prometheus Beispiele)
@@ -386,5 +413,83 @@ Dashboards (Grafana) – empfohlene Panels:
 - Approvals vs Revisions (stacked rate)
 - Plan Duration P95
 - Policy Denials (rate)
+
+## Story System (Lebendige Erzählung)
+Ein persistenter narrativer Zustand, der sich über Aktionen und Zeit entwickelt. Ressourcen (deutsche Keys) steuern Heuristiken für Optionen und LLM-Erzähltexte.
+
+### Ressourcen (Keys)
+| Key | Bedeutung | Typischer Start |
+|-----|-----------|----------------|
+| energie | Kurzfristige Handlungs-/Aufmerksamkeitsenergie | 80 |
+| wissen | Akkumuliertes strukturiertes Wissen | 0 |
+| inspiration | Roh-Ideen / kreative Impulse | 0 |
+| ruf | Außenwirkung / Reputation | 0 |
+| stabilitaet | Innere Ordnung / System-Stabilität | 80 |
+| erfahrung | Fortschritt / Erfahrungspunkte | 0 |
+| level | Progressionsstufe (Skalierung XP-Schwelle = level * 100) | 1 |
+
+### Endpoints
+- `GET /story/state` → Gesamter Zustand inkl. aktueller Optionsliste.
+- `GET /story/log?limit=50` → Chronologisch sortierte Events (tick / action / future: arc_shift ...).
+- `GET /story/options` → Nur aktuelle Optionen (falls UI periodisch pollt oder SSE nutzt).
+- `POST /story/action` `{ option_id? , free_text? }` → Wendet Option an ODER erzeugt Freitext-Aktion (leichter Inspiration+ Energie-Tradeoff).
+- `POST /story/advance` → Zeit-Fortschritt (passiver Tick, Energie-Decay, Option-Refresh, LLM-Erzähl-Satz).
+- `POST /story/options/regen` → Forciert Regeneration (Heuristik neu, z.B. nach externen State-Änderungen).
+
+Alle POST-Operationen benötigen `X-API-Key`.
+
+### Eventtypen (StoryEvent.kind)
+- `action` (aus gewählter Option oder Freitext)
+- `tick` (Zeitverlauf)
+- (geplant) `milestone`, `arc_shift`, `level_up`
+
+### SSE Events
+- `story.event` → Payload = StoryEvent
+- `story.state` → z.Z. Minimal (epoch / option count). Erweiterbar für UI Instant-Refresh.
+
+### Heuristische Optionen (MVP)
+Regeln (vereinfachte Beispiele):
+- Niedrige `energie` < 40 → Meditation (Energie +15, Inspiration +2)
+- Hohe `inspiration` > 10 & `wissen` < 50 → Strukturieren (Inspiration -> Wissen + Erfahrung)
+- `erfahrung` >= `level * 100` → Level-Up (XP Reset Teil, +Stabilität)
+- Fallback: Exploration (Inspiration +5, Energie -5, Erfahrung +3)
+
+### LLM Integration
+Wenn `GROQ_API_KEY` gesetzt → Kurzer deutscher Erzähl-Satz pro Aktion/Tick (Model Default: `llama-3.3-70b-versatile` oder Policy Override). Fallback ohne Key: abgeschnittener Prompt-Inhalt.
+
+### Metriken (Prometheus)
+- `story_events_total{kind}` → Anzahl pro Eventtyp
+- `story_options_open` (Gauge) → Aktuelle Anzahl generierter Optionen
+
+### Beispiel Flow (curl)
+```
+# Zustand holen
+curl -H "X-API-Key: test" http://localhost:8000/story/state
+# Optionen anzeigen
+curl -H "X-API-Key: test" http://localhost:8000/story/options
+# Aktion aus erster Option
+OPT=$(curl -s -H "X-API-Key: test" http://localhost:8000/story/options | python -c "import sys,json;d=json.load(sys.stdin);print(d[0]['id'])")
+curl -X POST -H "X-API-Key: test" -H "Content-Type: application/json" \
+  -d "{\"option_id\":\"$OPT\"}" http://localhost:8000/story/action
+# Freitext Aktion
+curl -X POST -H "X-API-Key: test" -H "Content-Type: application/json" \
+  -d '{"free_text":"kurzes Notat bündeln"}' http://localhost:8000/story/action
+# Zeit voranschreiten
+curl -X POST -H "X-API-Key: test" http://localhost:8000/story/advance
+```
+
+### Persistenz
+SQLite Tabellen:
+- `story_state(id=1)` – Singleton (epoch, mood, arc, resources JSON)
+- `story_events` – Verlauf
+- `story_options` – Kurzlebige aktuelle Auswahl
+
+### Geplante Erweiterungen
+- Arc-System (Kapitel / Themenwechsel) + `arc_shift` Events
+- Skill-/Buff-Mechanik (Temporäre Modifikatoren Ressourcen-Delta)
+- Option-Scoring & Risikoexplizierung
+- LLM Prompt Feintuning (Kontextkompression, Mood-Einflüsse)
+- Option TTL / automatische Veralterung
+- Tests: Edge-Cases (Level-Up, mehrfacher Tick ohne Aktionen, Migration alter englischer Keys)
 
 

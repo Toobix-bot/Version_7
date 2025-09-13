@@ -11,7 +11,7 @@ import re
 import logging
 from logging.handlers import RotatingFileHandler
 from functools import wraps
-from typing import Any, AsyncGenerator, Dict, Callable, Awaitable, TypeVar, Coroutine
+from typing import Any, AsyncGenerator, Dict, Callable, Awaitable, TypeVar, Coroutine, cast
 
 from fastapi import FastAPI, Depends, HTTPException, status, Request, Header, Body, Query
 from fastapi.openapi.utils import get_openapi
@@ -121,10 +121,11 @@ def custom_openapi():  # type: ignore
                 except Exception:
                     pass
             # 3b) Harden 200 (and other) object responses lacking properties/additionalProperties
-            for resp_code, resp in op.get("responses", {}).items():
-                content = resp.get("content", {}) if isinstance(resp, dict) else {}
-                for ctype, c in content.items():
-                    sch = c.get("schema") if isinstance(c, dict) else None
+            responses = cast(dict[str, Any], op.get("responses", {}))
+            for _, resp in responses.items():
+                content = cast(dict[str, Any], resp.get("content", {}) if isinstance(resp, dict) else {})
+                for _, c in content.items():
+                    sch = c.get("schema") if isinstance(c, dict) else None  # type: ignore[index]
                     if isinstance(sch, dict) and sch.get("type") == "object":
                         if "properties" not in sch and "additionalProperties" not in sch:
                             sch["additionalProperties"] = True
@@ -218,7 +219,12 @@ app.mount("/ui", StaticFiles(directory="ui", html=True), name="ui")
 state: Dict[str, Any] = {"agents": {}, "meta": {"version": app.version, "start": APP_START}}
 event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 policies: dict[str, Any] = {"loaded_at": time.time(), "rules": []}
-db_conn: sqlite3.Connection | None = None
+# ensure db_conn has an explicit typed declaration near top (if not already)
+try:
+    db_conn  # type: ignore  # noqa: F821
+except NameError:
+    from typing import Optional as _Opt
+    db_conn: 'sqlite3.Connection | None' = None  # runtime assigned in init_db
 
 REGISTRY = CollectorRegistry()
 ACTIONS_TOTAL = Counter("actions_total", "Count of observed actions", ["kind"], registry=REGISTRY)
@@ -235,6 +241,8 @@ SUGGEST_OPEN_GAUGE = Gauge("suggestions_open_total", "Open (draft/revised) sugge
 THOUGHT_GENERATED_TOTAL = Counter("thought_generated_total", "Generated background thoughts", registry=REGISTRY)
 THOUGHT_CATEGORY_TOTAL = Counter("thought_category_total", "Thoughts per category", ["category"], registry=REGISTRY)
 QUEST_COMPLETED_TOTAL = Counter("quest_completed_total", "Completed quests", registry=REGISTRY)
+STORY_EVENTS_TOTAL = Counter("story_events_total", "Story events count", ["kind"], registry=REGISTRY)
+STORY_OPTIONS_OPEN = Gauge("story_options_open", "Offene Story Optionen", registry=REGISTRY)
 
 RISK_PATTERNS = [r"\b(os\.system|subprocess\.)", r"\.\./", r"/etc/passwd", r"\b(?:ssh|https?|ftp)://", r"(?i)api[_-]?key", r"(?i)\b(token|secret)\b"]
 
@@ -398,6 +406,414 @@ class QuestItem(BaseModel):
 class QuestListResponse(BaseModel):
     items: list[QuestItem]
 
+# ---------------- Story / Narrative Models (MVP Phase 1) ----------------
+class StoryOption(BaseModel):
+    id: str
+    label: str
+    rationale: str | None = None
+    risk: int = 0  # 0–3
+    expected: dict[str, int] | None = None
+    tags: list[str] = []
+    expires_at: float | None = None
+
+class StoryEvent(BaseModel):
+    id: str
+    ts: float
+    epoch: int
+    kind: str  # tick|action|system
+    text: str
+    mood: str
+    deltas: dict[str, int] | None = None
+    tags: list[str] = []
+    option_ref: str | None = None
+
+class StoryState(BaseModel):
+    epoch: int
+    mood: str
+    arc: str
+    resources: dict[str, int]
+    options: list[StoryOption] = []
+
+# --- Arc Evaluation (simple progression) ---
+_ARC_ORDER = ["foundations", "exploration", "mastery"]
+
+def _eval_arc(resources: dict[str,int], current: str) -> str:
+    lvl = resources.get("level",1)
+    # simple thresholds
+    if lvl >= 10:
+        return "mastery"
+    if lvl >= 3:
+        return "exploration"
+    return "foundations"
+
+def _maybe_arc_shift(conn: sqlite3.Connection, prev_arc: str, new_arc: str, epoch: int, mood: str) -> StoryEvent | None:
+    if new_arc == prev_arc:
+        return None
+    ev_id = f"sev_{int(_story_now()*1000)}"
+    text = f"Arc-Wechsel: {prev_arc} -> {new_arc}"
+    conn.execute(
+        "INSERT INTO story_events(ts, epoch, kind, text, mood, deltas, tags, option_ref) VALUES (?,?,?,?,?,?,?,?)",
+        (_story_now(), epoch, "arc_shift", text, mood, json.dumps({}), json.dumps(["arc_shift"]), None)
+    )
+    return StoryEvent(id=ev_id, ts=_story_now(), epoch=epoch, kind="arc_shift", text=text, mood=mood, deltas={}, tags=["arc_shift"], option_ref=None)
+
+# Default resources baseline
+# Story Ressource Keys (deutsch)
+# energie, wissen, inspiration, ruf, stabilitaet, erfahrung, level
+_STORY_RESOURCE_KEYS = [
+    "energie",
+    "wissen",
+    "inspiration",
+    "ruf",
+    "stabilitaet",
+    "erfahrung",
+    "level",
+]
+_STORY_OLD_KEY_MAP = {
+    "energy": "energie",
+    "knowledge": "wissen",
+    "inspiration": "inspiration",
+    "reputation": "ruf",
+    "stability": "stabilitaet",
+    "xp": "erfahrung",
+    "level": "level",
+}
+
+def _story_now() -> float:
+    return time.time()
+
+def _get_story_state(conn: sqlite3.Connection) -> StoryState:
+    cur = conn.execute("SELECT epoch, mood, arc, resources FROM story_state WHERE id=1")
+    row = cur.fetchone()
+    if not row:
+        # initialize
+        resources = {k: 0 for k in _STORY_RESOURCE_KEYS}
+        resources.update({"energie": 80, "stabilitaet": 80, "level": 1})
+        conn.execute(
+            "INSERT INTO story_state(id, ts, epoch, mood, arc, resources) VALUES (1, ?, ?, ?, ?, ?)",
+            (_story_now(), 0, "calm", "foundations", json.dumps(resources)),
+        )
+        conn.commit()
+        return StoryState(epoch=0, mood="calm", arc="foundations", resources=resources, options=[])
+    epoch, mood, arc, resources_json = row
+    resources = json.loads(resources_json)
+    # backward compatibility mapping englische keys -> deutsch
+    migrated = False
+    for old, new in _STORY_OLD_KEY_MAP.items():
+        if old in resources:
+            resources[new] = resources.get(new, 0) + resources.pop(old)
+            migrated = True
+    if migrated:
+        conn.execute("UPDATE story_state SET resources=? WHERE id=1", (json.dumps(resources),))
+        conn.commit()
+    options = _list_story_options(conn)
+    return StoryState(epoch=epoch, mood=mood, arc=arc, resources=resources, options=options)
+
+def _list_story_options(conn: sqlite3.Connection) -> list[StoryOption]:
+    cur = conn.execute("SELECT id, label, rationale, risk, expected, tags, expires_at FROM story_options ORDER BY created_at DESC")
+    out: list[StoryOption] = []
+    now = _story_now()
+    for row in cur.fetchall():
+        oid, label, rationale, risk, expected_json, tags_json, expires_at = row
+        if expires_at and expires_at < now:
+            continue
+        expected: dict[str, int] | None
+        if expected_json:
+            try:
+                raw = json.loads(expected_json)
+                if isinstance(raw, dict):
+                    expected = {str(k): int(v) for k, v in raw.items() if isinstance(v, (int, float))}
+                else:
+                    expected = None
+            except Exception:
+                expected = None
+        else:
+            expected = None
+        tags: list[str]
+        if tags_json:
+            try:
+                raw_t = json.loads(tags_json)
+                if isinstance(raw_t, list):
+                    tags = [str(t) for t in raw_t]
+                else:
+                    tags = []
+            except Exception:
+                tags = []
+        else:
+            tags = []
+        out.append(StoryOption(id=oid, label=label, rationale=rationale, risk=risk, expected=expected, tags=tags, expires_at=expires_at))
+    return out
+
+def _generate_story_options(state: StoryState) -> list[StoryOption]:
+    opts: list[StoryOption] = []
+    res = state.resources
+    # heuristic examples
+    if res.get("energie", 0) < 40:
+        opts.append(
+            StoryOption(
+                id=f"opt_rest_{int(_story_now())}",
+                label="Meditieren und Energie sammeln",
+                rationale="Niedrige Energie erkannt",
+                risk=0,
+                expected={"energie": +15, "inspiration": +2},
+                tags=["resource:energie"],
+            )
+        )
+    if res.get("inspiration", 0) > 10 and res.get("wissen", 0) < 50:
+        opts.append(
+            StoryOption(
+                id=f"opt_write_{int(_story_now())}",
+                label="Ideen schriftlich strukturieren",
+                rationale="Inspiration in Wissen umwandeln",
+                risk=1,
+                expected={"inspiration": -5, "wissen": +8, "erfahrung": +5},
+                tags=["convert", "resource:wissen"],
+            )
+        )
+    if res.get("erfahrung", 0) >= (state.resources.get("level", 1) * 100):
+        xp_cost = state.resources.get("level", 1) * 100
+        opts.append(
+            StoryOption(
+                id=f"opt_level_{int(_story_now())}",
+                label="Reflektion und Level-Aufstieg",
+                rationale="Erfahrungsschwelle erreicht",
+                risk=1,
+                expected={"erfahrung": -xp_cost, "level": +1, "stabilitaet": +5},
+                tags=["levelup"],
+            )
+        )
+    # fallback
+    if not opts:
+        opts.append(
+            StoryOption(
+                id=f"opt_explore_{int(_story_now())}",
+                label="Neuen Gedankenpfad erkunden",
+                rationale="Kein dringendes Bedürfnis",
+                risk=1,
+                expected={"inspiration": +5, "energie": -5, "erfahrung": +3},
+                tags=["explore"],
+            )
+        )
+    return opts
+
+def _persist_options(conn: sqlite3.Connection, options: list[StoryOption]) -> None:
+    now = _story_now()
+    for o in options:
+        conn.execute("INSERT OR REPLACE INTO story_options(id, created_at, label, rationale, risk, expected, tags, expires_at) VALUES (?,?,?,?,?,?,?,?)",
+                     (o.id, now, o.label, o.rationale, o.risk, json.dumps(o.expected) if o.expected else None, json.dumps(o.tags), o.expires_at))
+    conn.commit()
+
+def _refresh_story_options(conn: sqlite3.Connection, state: StoryState) -> list[StoryOption]:
+    # clear existing (simple strategy MVP)
+    conn.execute("DELETE FROM story_options")
+    opts = _generate_story_options(state)
+    _persist_options(conn, opts)
+    return opts
+
+def _apply_story_option(conn: sqlite3.Connection, state: StoryState, option_id: str) -> StoryEvent:
+    cur = conn.execute("SELECT id, label, rationale, risk, expected FROM story_options WHERE id=?", (option_id,))
+    row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"error": {"code": "story.option_not_found", "message": "Option nicht gefunden"}})
+    _, label, rationale, risk, expected_json = row
+    expected: dict[str, int] = {}
+    if expected_json:
+        try:
+            raw = json.loads(expected_json)
+            if isinstance(raw, dict):
+                for k, v in raw.items():
+                    if isinstance(v, (int, float)):
+                        expected[str(k)] = int(v)
+        except Exception:
+            expected = {}
+    # apply delta
+    new_resources = dict(state.resources)
+    deltas: dict[str,int] = {}
+    for k, delta in expected.items():
+        before = new_resources.get(k, 0)
+        after = before + delta
+        new_resources[k] = after
+        deltas[k] = delta
+    epoch = int(getattr(state, 'epoch', 0)) + 1
+    mood = state.mood
+    # simple mood tweak
+    if deltas.get("energie",0) > 0:
+        mood = "calm"
+    if deltas.get("inspiration",0) > 0:
+        mood = "curious"
+    # possible arc shift before commit
+    new_arc = _eval_arc(new_resources, state.arc)
+    conn.execute("UPDATE story_state SET ts=?, epoch=?, mood=?, arc=?, resources=? WHERE id=1", (_story_now(), epoch, mood, new_arc, json.dumps(new_resources)))
+    ev_id = f"sev_{int(_story_now()*1000)}"
+    conn.execute("INSERT INTO story_events(ts, epoch, kind, text, mood, deltas, tags, option_ref) VALUES (?,?,?,?,?,?,?,?)", (_story_now(), epoch, "action", label, mood, json.dumps(deltas), json.dumps(["action"]), option_id))
+    arc_event = _maybe_arc_shift(conn, state.arc, new_arc, epoch, mood)
+    # refresh options after action
+    conn.execute("DELETE FROM story_options")
+    conn.commit()
+    # return primary event (arc shift will also be in log)
+    return StoryEvent(id=ev_id, ts=_story_now(), epoch=epoch, kind="action", text=label, mood=mood, deltas=deltas, tags=["action"], option_ref=option_id)
+
+def _story_tick(conn: sqlite3.Connection) -> StoryEvent:
+    state = _get_story_state(conn)
+    # passive drift
+    resources = dict(state.resources)
+    resources["energie"] = max(0, resources.get("energie",0) - 1)
+    epoch = state.epoch + 1
+    mood = state.mood
+    if resources.get("energie",0) < 30:
+        mood = "strained"
+    new_arc = _eval_arc(resources, state.arc)
+    conn.execute("UPDATE story_state SET ts=?, epoch=?, mood=?, arc=?, resources=? WHERE id=1", (_story_now(), epoch, mood, new_arc, json.dumps(resources)))
+    ev_id = f"sev_{int(_story_now()*1000)}"
+    text = "Zeit vergeht. Eine stille Verschiebung im inneren Raum."
+    conn.execute(
+        "INSERT INTO story_events(ts, epoch, kind, text, mood, deltas, tags, option_ref) VALUES (?,?,?,?,?,?,?,?)",
+        (_story_now(), epoch, "tick", text, mood, json.dumps({"energie": -1}), json.dumps(["tick"]), None),
+    )
+    _maybe_arc_shift(conn, state.arc, new_arc, epoch, mood)
+    # regenerate options occasionally
+    _refresh_story_options(conn, StoryState(epoch=epoch, mood=mood, arc=state.arc, resources=resources, options=[]))
+    conn.commit()
+    return StoryEvent(id=ev_id, ts=_story_now(), epoch=epoch, kind="tick", text=text, mood=mood, deltas={"energie": -1}, tags=["tick"], option_ref=None)
+
+# ---------------- Story LLM Support -----------------
+async def _story_llm_generate(prompt: str, max_tokens: int = 120) -> str:
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        return prompt.split("\n\n")[-1][:max_tokens]  # fallback simple
+    try:
+        from groq import Groq  # type: ignore
+        client = Groq(api_key=api_key)
+        resp = client.chat.completions.create(
+            model=(current_policy.llm.model if (current_policy and getattr(current_policy, 'llm', None) and getattr(current_policy.llm,'model',None)) else "llama-3.3-70b-versatile"),
+            messages=[{"role":"system","content":"Du bist ein knapper literarischer Erzähler auf Deutsch."},{"role":"user","content": prompt}],
+            temperature=0.6,
+            max_tokens=max_tokens,
+        )
+        txt = resp.choices[0].message.content.strip()
+        return txt
+    except Exception:
+        return prompt.split("\n\n")[-1][:max_tokens]
+
+def _record_story_event(ev: StoryEvent) -> None:  # type: ignore[override]
+    try:
+        STORY_EVENTS_TOTAL.labels(ev.kind).inc()
+        if db_conn:
+            try:
+                cur = db_conn.execute("SELECT COUNT(*) FROM story_options")
+                cnt = cur.fetchone()[0]
+                STORY_OPTIONS_OPEN.set(int(cnt))
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+# ---------------- Story API Endpoints -----------------
+# (require_auth defined later; provide lightweight forwarder for type check/import)
+try:
+    require_auth  # type: ignore[name-defined]
+except NameError:
+    async def require_auth(x_api_key: str | None = Header(None, alias="X-API-Key")) -> str:  # type: ignore
+        return "default-agent"
+
+@app.get("/story/state", response_model=StoryState)
+async def story_get_state(agent: str = Depends(require_auth)) -> StoryState:  # type: ignore[override]
+    rate_limit(agent)
+    st = _get_story_state(db_conn)  # type: ignore[arg-type]
+    return st
+
+@app.get("/story/log", response_model=list[StoryEvent])
+async def story_log(limit: int = 50, agent: str = Depends(require_auth)) -> list[StoryEvent]:  # type: ignore[override]
+    rate_limit(agent)
+    cur = db_conn.execute("SELECT id, ts, epoch, kind, text, mood, deltas, tags, option_ref FROM story_events ORDER BY id DESC LIMIT ?", (limit,))  # type: ignore[arg-type]
+    out: list[StoryEvent] = []
+    for row in cur.fetchall():
+        rid, ts, epoch, kind, text, mood, deltas_json, tags_json, option_ref = row
+        deltas: dict[str, int] | None
+        if deltas_json:
+            try:
+                raw_d = json.loads(deltas_json)
+                if isinstance(raw_d, dict):
+                    deltas = {str(k): int(v) for k, v in raw_d.items() if isinstance(v, (int, float))}
+                else:
+                    deltas = None
+            except Exception:
+                deltas = None
+        else:
+            deltas = None
+        tags: list[str]
+        if tags_json:
+            try:
+                raw_t = json.loads(tags_json)
+                if isinstance(raw_t, list):
+                    tags = [str(t) for t in raw_t]
+                else:
+                    tags = []
+            except Exception:
+                tags = []
+        else:
+            tags = []
+        out.append(StoryEvent(id=str(rid), ts=ts, epoch=epoch, kind=kind, text=text, mood=mood, deltas=deltas, tags=tags, option_ref=option_ref))
+    return list(reversed(out))
+
+@app.get("/story/options", response_model=list[StoryOption])
+async def story_options(agent: str = Depends(require_auth)) -> list[StoryOption]:  # type: ignore[override]
+    rate_limit(agent)
+    st = _get_story_state(db_conn)  # type: ignore[arg-type]
+    return st.options
+
+class StoryActionRequest(BaseModel):
+    option_id: str | None = None
+    free_text: str | None = None
+
+@app.post("/story/action", response_model=StoryEvent)
+async def story_action(req: StoryActionRequest, agent: str = Depends(require_auth)) -> StoryEvent:  # type: ignore[override]
+    rate_limit(agent)
+    st = _get_story_state(db_conn)  # type: ignore[arg-type]
+    if req.option_id:
+        ev = _apply_story_option(db_conn, st, req.option_id)  # type: ignore[arg-type]
+    else:
+        # free text becomes a minor inspiration action
+        label = req.free_text.strip() if req.free_text else "Freies Nachdenken"
+        ev = _apply_story_option(db_conn, st, _persist_free_action(label))  # pseudo id from helper will raise for now
+        # Above placeholder; for MVP we simply create a synthetic event
+    # enrich text with LLM
+    prompt = f"Aktueller Zustand: Ressourcen={st.resources}\nAktion: {ev.text}\nFormuliere einen kurzen erzählerischen Satz im Präteritum (<=25 Wörter)."
+    ev.text = await _story_llm_generate(prompt, max_tokens=60)
+    _record_story_event(ev)
+    await emit_event("story.event", ev.model_dump())
+    await emit_event("story.state", {"epoch": ev.epoch})
+    return ev
+
+def _persist_free_action(label: str) -> str:
+    # create transient option to reuse apply logic with neutral deltas
+    oid = f"opt_free_{int(_story_now())}"
+    opt = StoryOption(id=oid, label=label, rationale="Freitext Aktion", risk=1, expected={"inspiration": +1, "energie": -1})
+    _persist_options(db_conn, [opt])  # type: ignore[arg-type]
+    return oid
+
+@app.post("/story/advance", response_model=StoryEvent)
+async def story_advance(agent: str = Depends(require_auth)) -> StoryEvent:  # type: ignore[override]
+    rate_limit(agent)
+    ev = _story_tick(db_conn)  # type: ignore[arg-type]
+    # decorate tick text via LLM
+    st = _get_story_state(db_conn)  # type: ignore[arg-type]
+    prompt = f"Ressourcen: {st.resources}\nEreignis: {ev.text}\nSchreibe einen knappen poetischen Tick-Satz auf Deutsch (<=18 Wörter)."
+    ev.text = await _story_llm_generate(prompt, max_tokens=50)
+    _record_story_event(ev)
+    await emit_event("story.event", ev.model_dump())
+    await emit_event("story.state", {"epoch": ev.epoch})
+    return ev
+
+@app.post("/story/options/regen", response_model=list[StoryOption])
+async def story_options_regen(agent: str = Depends(require_auth)) -> list[StoryOption]:  # type: ignore[override]
+    rate_limit(agent)
+    st = _get_story_state(db_conn)  # type: ignore[arg-type]
+    opts = _refresh_story_options(db_conn, st)  # type: ignore[arg-type]
+    STORY_OPTIONS_OPEN.set(len(opts))
+    await emit_event("story.state", {"options": len(opts)})
+    return opts
+
 # ---------------- Database ----------------
 def init_db() -> None:
     global db_conn
@@ -448,6 +864,36 @@ def init_db() -> None:
             text TEXT NOT NULL,
             kind TEXT NOT NULL,
             meta TEXT
+        );
+        -- Story / Narrative tables (MVP)
+        CREATE TABLE IF NOT EXISTS story_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            ts REAL NOT NULL,
+            epoch INTEGER NOT NULL,
+            mood TEXT NOT NULL,
+            arc TEXT NOT NULL,
+            resources TEXT NOT NULL -- JSON serialized resource map
+        );
+        CREATE TABLE IF NOT EXISTS story_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts REAL NOT NULL,
+            epoch INTEGER NOT NULL,
+            kind TEXT NOT NULL,
+            text TEXT NOT NULL,
+            mood TEXT NOT NULL,
+            deltas TEXT, -- JSON map of resource deltas
+            tags TEXT,   -- JSON array
+            option_ref TEXT
+        );
+        CREATE TABLE IF NOT EXISTS story_options (
+            id TEXT PRIMARY KEY,
+            created_at REAL NOT NULL,
+            label TEXT NOT NULL,
+            rationale TEXT,
+            risk INTEGER NOT NULL,
+            expected TEXT, -- JSON map expected resource delta
+            tags TEXT, -- JSON array
+            expires_at REAL
         );
         """
     )
@@ -1088,6 +1534,142 @@ def update_open_gauge() -> None:
         asyncio.create_task(emit_event("suggest.open", {"open": open_count}))
     except Exception:
         pass
+
+# -------- Auto Suggest (Static Heuristics) --------
+AUTO_SCAN_MAX_FILES = int(os.getenv("AUTO_SUGGEST_MAX_FILES", "300"))
+LARGE_FILE_THRESHOLD = int(os.getenv("AUTO_SUGGEST_LARGE_FILE", "1200"))  # lines
+LARGE_FUNC_THRESHOLD = int(os.getenv("AUTO_SUGGEST_LARGE_FUNC", "80"))    # lines
+
+def _read_text(path: str) -> str:
+    try:
+        if os.path.getsize(path) > 2_000_000:
+            return ""  # skip huge
+        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+            return f.read()
+    except Exception:
+        return ""
+
+def _scan_codebase_for_improvements() -> dict[str, Any]:
+    findings: dict[str, Any] = {"todos": [], "large_files": [], "large_functions": [], "broad_except": [], "dup_literals": []}
+    literal_counts: dict[str, int] = {}
+    scanned = 0
+    for root, dirs, files in os.walk('.'):  # simplistic walk respecting EXCLUDE_DIRS
+        dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS]
+        for fn in files:
+            if scanned >= AUTO_SCAN_MAX_FILES:
+                break
+            if not fn.endswith(('.py', '.md', '.txt', '.yaml', '.yml')):
+                continue
+            path = os.path.join(root, fn).lstrip('./')
+            text = _read_text(path)
+            if not text:
+                continue
+            scanned += 1
+            # TODO / FIXME
+            for m in re.finditer(r'(?i)\b(TODO|FIXME|HACK)\b(.{0,80})', text):
+                snippet = m.group(0).strip()
+                findings['todos'].append({"file": path, "snippet": snippet})
+            # large file (by lines)
+            lines = text.splitlines()
+            if len(lines) >= LARGE_FILE_THRESHOLD:
+                findings['large_files'].append({"file": path, "lines": len(lines)})
+            # naive function size detection (def ... : then until blank lines decrease indentation)
+            if path.endswith('.py'):
+                for i, line in enumerate(lines):
+                    if line.startswith('def ') and line.rstrip().endswith(':'):
+                        start_indent = len(line) - len(line.lstrip())
+                        block_len = 0
+                        for j in range(i+1, len(lines)):
+                            l2 = lines[j]
+                            if l2.strip()=='' and block_len>5:  # soft break after some lines
+                                break
+                            indent = len(l2) - len(l2.lstrip())
+                            if l2 and indent <= start_indent and l2.lstrip().startswith('def '):
+                                break
+                            block_len += 1
+                        if block_len >= LARGE_FUNC_THRESHOLD:
+                            findings['large_functions'].append({"file": path, "line": i+1, "lines": block_len, "signature": line.strip()})
+                # broad except
+                for m in re.finditer(r'except\s+Exception\s*:', text):
+                    findings['broad_except'].append({"file": path, "pos": m.start()})
+            # duplicate string literals (very naive)
+            for lit in re.findall(r'"([A-Za-z0-9 _-]{5,40})"|\'([A-Za-z0-9 _-]{5,40})\'', text):
+                val = (lit[0] or lit[1]).strip()
+                if not val or ' ' not in val:
+                    continue  # skip single words
+                literal_counts[val] = literal_counts.get(val, 0) + 1
+    # collect duplicates above threshold
+    for k,v in literal_counts.items():
+        if v >= 4:
+            findings['dup_literals'].append({"literal": k, "count": v})
+    findings['scanned_files'] = scanned
+    return findings
+
+def _build_auto_suggestions(findings: dict[str, Any]) -> list[Suggestion]:
+    suggestions: list[Suggestion] = []
+    now = time.time()
+    # Helper to create suggestion
+    def make_suggestion(goal: str, rationale: str, steps: list[str], weaknesses: list[str], tags: list[str]) -> Suggestion:
+        sid = f"sug_{int(now)}_{random.randint(1000,9999)}_auto"
+        s = Suggestion(
+            id=sid,
+            created_at=time.time(),
+            status="draft",
+            goal=goal,
+            focus_paths=None,
+            summary=goal,
+            rationale=rationale,
+            recommended_steps=steps,
+            potential_patches=[],
+            risk_notes=["Nur statische Codeanalyse, keine geheimen Daten gelesen."],
+            weaknesses=weaknesses,
+            metrics_impact={"tests": "+" if 'test' in goal.lower() else "~", "docs": "+" if 'doku' in goal.lower() or 'doc' in goal.lower() else "~", "observability": "+" if 'metr' in goal.lower() else "~"},
+            tags=tags,
+        )
+        return s
+    todos = findings.get('todos', [])
+    if todos:
+        rationale = f"{len(todos)} TODO/FIXME/HACK Fundstellen erkannt. Konsolidierung erhöht Wartbarkeit."
+        steps = ["TODOs gruppieren und in Issues überführen", "Veraltete TODOs entfernen", "Klare Ownership definieren"]
+        weaknesses = ["Akkumulation von technischen Schulden", "Unklare Priorisierung von TODO Items"]
+        suggestions.append(make_suggestion("Offene TODOs reduzieren", rationale, steps, weaknesses, ["auto","static"]))
+    if findings.get('large_files'):
+        lf = findings['large_files']
+        rationale = f"{len(lf)} sehr große Dateien >= {LARGE_FILE_THRESHOLD} Zeilen erhöhen kognitive Last."
+        steps = ["Dateien modularisieren", "Gemeinsame Utilities extrahieren", "Tests für kritische ausgelagerte Module ergänzen"]
+        weaknesses = ["Erschwerte Navigation", "Höheres Merge-Konflikt Risiko"]
+        suggestions.append(make_suggestion("Große Dateien aufteilen", rationale, steps, weaknesses, ["auto","static"]))
+    if findings.get('large_functions'):
+        lf = findings['large_functions']
+        rationale = f"{len(lf)} Funktionen über {LARGE_FUNC_THRESHOLD} Zeilen gefunden – Refactoring senkt Fehlerrisiko."
+        steps = ["Long Functions in kleinere Hilfsfunktionen extrahieren", "Parameterzahl prüfen", "Gezielte Unit Tests schreiben"]
+        weaknesses = ["Schwierige Testbarkeit", "Erhöhte Fehleranfälligkeit"]
+        suggestions.append(make_suggestion("Lange Funktionen refaktorieren", rationale, steps, weaknesses, ["auto","static"]))
+    if findings.get('broad_except'):
+        be = findings['broad_except']
+        rationale = f"{len(be)} broad 'except Exception:' Blöcke – Präzisere Exceptions verbessern Fehlerdiagnose."
+        steps = ["Konkrete Exception-Typen einsetzen", "Logging differenzieren", "Fehlerrouten testen"]
+        weaknesses = ["Schluckt spezifische Fehler", "Monitoring erschwert"]
+        suggestions.append(make_suggestion("Exception Handling präzisieren", rationale, steps, weaknesses, ["auto","static"]))
+    if findings.get('dup_literals'):
+        dl = findings['dup_literals']
+        rationale = f"{len(dl)} häufig wiederholte Textbausteine (>=4x) – Konstante/Config reduziert Redundanz."
+        steps = ["Wiederholte Strings als Konstante extrahieren", "Konfiguration prüfen (env/policy)", "Tests zur Konsistenz hinzufügen"]
+        weaknesses = ["Erhöhte Inkonsistenz-Gefahr", "Schwieriger globale Anpassungen"]
+        suggestions.append(make_suggestion("Duplizierte Literale konsolidieren", rationale, steps, weaknesses, ["auto","static"]))
+    return suggestions
+
+@app.post("/suggest/auto", response_model=list[Suggestion])
+async def suggest_auto(agent: str = Depends(require_auth)) -> list[Suggestion]:  # type: ignore[override]
+    rate_limit(agent)
+    findings = _scan_codebase_for_improvements()
+    sugs = _build_auto_suggestions(findings)
+    for s in sugs:
+        _save_suggestion(s)
+        SUGGEST_GENERATED_TOTAL.inc()
+        await emit_event("suggest.generated", {"id": s.id, "auto": True})
+    update_open_gauge()
+    return sugs
 
 @app.post("/suggest/generate", response_model=Suggestion)
 async def suggest_generate(req: SuggestGenerateRequest, agent: str = Depends(require_auth)) -> Suggestion:  # type: ignore[override]

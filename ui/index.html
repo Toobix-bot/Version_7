@@ -176,6 +176,7 @@
 			<div class="row">
 				<button id="btnSuggestList" class="secondary">Aktualisieren</button>
 				<button id="btnSuggestGen">Generieren</button>
+				<button id="btnSuggestAuto" class="secondary">Auto</button>
 				<input id="suggestId" placeholder="ID" style="flex:1;" />
 			</div>
 			<div class="row">
@@ -375,6 +376,7 @@
 		function updateOpenBadge(n){ const b=$('#suggestOpenBadge'); if(!b) return; b.textContent='open: '+n; b.style.background = n>0? '#3a2f13':'#1f3b2b'; b.style.color = n>0? '#facc15':'#6ee7b7'; }
 		async function refreshSuggestList(){ const r=await api('/suggest/list?limit=50'); const box=$('#suggestList'); if(!box) return; if(!r.items||!r.items.length){ box.innerHTML='<em style="color:#667">Keine Einträge.</em>'; if(typeof r.open==='number') updateOpenBadge(r.open); return;} box.innerHTML=''; r.items.forEach(it=>{ const row=document.createElement('button'); row.className='secondary'; row.style.display='flex'; row.style.justifyContent='space-between'; row.style.width='100%'; row.textContent = `${it.id} · ${it.status}`; row.onclick=()=>{ $('#suggestId').value=it.id; loadSuggest(); }; box.appendChild(row); }); if(typeof r.open==='number') updateOpenBadge(r.open); }
 		async function genSuggest(){ const goal=$('#suggestGoal').value.trim(); const focus=$('#suggestFocus').value.split(',').map(s=>s.trim()).filter(Boolean); const body={goal, focus_paths:focus.length?focus:undefined}; const r=await api('/suggest/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); setText('#suggestOut', fmt(r)); if(r.id) $('#suggestId').value=r.id; refreshSuggestList(); }
+		async function autoSuggest(){ const r=await api('/suggest/auto',{method:'POST'}); setText('#suggestOut', fmt(r)); refreshSuggestList(); }
 		async function loadSuggest(){ const id=$('#suggestId').value.trim(); if(!id) return; const r=await api('/suggest/review?id='+encodeURIComponent(id)); setText('#suggestOut', fmt(r)); if(r.potential_patches) renderPatch(r.potential_patches); loadImpact(id); }
 		async function approveSuggest(){ const id=$('#suggestId').value.trim(); if(!id) return; const body={id, approve:true}; const r=await api('/suggest/review',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); setText('#suggestOut', fmt(r)); refreshSuggestList(); loadImpact(id); }
 		async function reviseSuggest(){ const id=$('#suggestId').value.trim(); if(!id) return; const adjustments=$('#suggestAdjust').value; const body={id, approve:false, adjustments}; const r=await api('/suggest/review',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); setText('#suggestOut', fmt(r)); refreshSuggestList(); loadImpact(id); }
@@ -412,7 +414,7 @@
 		// Events patch already updates open badge & triggers refreshThoughts
 		$('#btnThoughtRefresh').onclick=refreshThoughts; $('#btnThoughtGen').onclick=genThought;
 		// Bind buttons
-		$('#btnMeta').onclick=loadMeta; $('#btnLLM').onclick=loadLLM; $('#btnPlan').onclick=runPlan; $('#btnChat').onclick=runChat; $('#btnEvents').onclick=startEvents; $('#btnMetrics').onclick=loadMetrics; $('#btnIdleState').onclick=loadIdleState; $('#btnIdleTick').onclick=runIdleTick; $('#btnPolicyLoad').onclick=loadPolicy; $('#btnPolicyValidate').onclick=validatePolicy; $('#btnPolicyApply').onclick=applyPolicy; $('#btnSuggestGen').onclick=genSuggest; $('#btnSuggestLoad').onclick=loadSuggest; $('#btnSuggestApprove').onclick=approveSuggest; $('#btnSuggestRevise').onclick=reviseSuggest; $('#btnSuggestRefine').onclick=refineSuggest; $('#btnSuggestList').onclick=refreshSuggestList; $('#btnSuggestDownload').onclick=downloadSuggest; $('#btnSuggestCopyPatch').onclick=copySuggestPatch;
+		$('#btnMeta').onclick=loadMeta; $('#btnLLM').onclick=loadLLM; $('#btnPlan').onclick=runPlan; $('#btnChat').onclick=runChat; $('#btnEvents').onclick=startEvents; $('#btnMetrics').onclick=loadMetrics; $('#btnIdleState').onclick=loadIdleState; $('#btnIdleTick').onclick=runIdleTick; $('#btnPolicyLoad').onclick=loadPolicy; $('#btnPolicyValidate').onclick=validatePolicy; $('#btnPolicyApply').onclick=applyPolicy; $('#btnSuggestGen').onclick=genSuggest; $('#btnSuggestAuto').onclick=autoSuggest; $('#btnSuggestLoad').onclick=loadSuggest; $('#btnSuggestApprove').onclick=approveSuggest; $('#btnSuggestRevise').onclick=reviseSuggest; $('#btnSuggestRefine').onclick=refineSuggest; $('#btnSuggestList').onclick=refreshSuggestList; $('#btnSuggestDownload').onclick=downloadSuggest; $('#btnSuggestCopyPatch').onclick=copySuggestPatch;
 		// Idle
 		async function loadIdleState(){ const r=await api('/game/idle/state'); setText('#idleOut', fmt(r)); if(r.state){$('#idleInfo').textContent='tick: '+r.state.tick+' res:'+r.state.resources;} }
 		async function runIdleTick(){ const r=await api('/game/idle/tick',{method:'POST'}); setText('#idleOut', fmt(r)); if(r.state){$('#idleInfo').textContent='tick: '+r.state.tick+' res:'+r.state.resources;} }
