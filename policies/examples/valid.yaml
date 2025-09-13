@@ -1,0 +1,13 @@
+version: "1"
+allowed_dirs:
+  - api
+  - plans
+  - plugins/games
+llm:
+  model: llama-3.3-70b-versatile
+  temperature: 0.0
+  max_tokens: 512
+max_diff_lines: 800
+deny_globs:
+  - "**/*.pem"
+  - "**/secrets.*"

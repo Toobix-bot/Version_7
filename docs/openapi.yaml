@@ -7,6 +7,15 @@ paths:
     post:
       summary: Act
       operationId: act_act_post
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
       requestBody:
         required: true
         content:
@@ -21,6 +30,7 @@ paths:
               schema:
                 type: object
                 title: Response Act Act Post
+                additionalProperties: true
         '422':
           description: Validation Error
           content:
@@ -31,6 +41,15 @@ paths:
     post:
       summary: Turn
       operationId: turn_turn_post
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
       requestBody:
         required: true
         content:
@@ -45,6 +64,7 @@ paths:
               schema:
                 type: object
                 title: Response Turn Turn Post
+                additionalProperties: true
         '422':
           description: Validation Error
           content:
@@ -60,8 +80,18 @@ paths:
         in: query
         required: false
         schema:
-          type: string
+          anyOf:
+          - type: string
+          - type: 'null'
           title: Agent Id
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
       responses:
         '200':
           description: Successful Response
@@ -70,6 +100,7 @@ paths:
               schema:
                 type: object
                 title: Response Get State State Get
+                additionalProperties: true
         '422':
           description: Validation Error
           content:
@@ -80,6 +111,15 @@ paths:
     get:
       summary: Get Meta
       operationId: get_meta_meta_get
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
       responses:
         '200':
           description: Successful Response
@@ -88,6 +128,7 @@ paths:
               schema:
                 type: object
                 title: Response Get Meta Meta Get
+                additionalProperties: true
         '422':
           description: Validation Error
           content:
@@ -112,37 +153,63 @@ paths:
     get:
       summary: Events Stream
       operationId: events_stream_events_get
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
       responses:
         '200':
-          description: OK (Server-Sent Events)
+          description: Successful Response
           content:
             text/event-stream:
               schema:
                 type: string
-                description: SSE stream of JSON event lines
+                description: SSE stream
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /metrics:
     get:
       summary: Metrics
       operationId: metrics_metrics_get
       responses:
         '200':
-          description: OK (Prometheus exposition format)
+          description: Successful Response
           content:
             text/plain:
               schema:
                 type: string
+                description: Prometheus exposition format
   /policy/reload:
     post:
       summary: Policy Reload
       operationId: policy_reload_policy_reload_post
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
       requestBody:
         content:
           application/json:
             schema:
-              anyOf:
-              - type: string
-              - type: 'null'
-              title: Path
+              type: object
+              properties:
+                path:
+                  type: string
+                  nullable: true
       responses:
         '200':
           description: Successful Response
@@ -151,6 +218,7 @@ paths:
               schema:
                 type: object
                 title: Response Policy Reload Policy Reload Post
+                additionalProperties: true
         '422':
           description: Validation Error
           content:
@@ -161,6 +229,15 @@ paths:
     post:
       summary: Plan
       operationId: plan_plan_post
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
       requestBody:
         required: true
         content:
@@ -175,6 +252,7 @@ paths:
               schema:
                 type: object
                 title: Response Plan Plan Post
+                additionalProperties: true
         '422':
           description: Validation Error
           content:
@@ -195,6 +273,15 @@ paths:
     post:
       summary: Llm Chat
       operationId: llm_chat_llm_chat_post
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
       requestBody:
         required: true
         content:
@@ -218,6 +305,15 @@ paths:
     get:
       summary: Llm Status
       operationId: llm_status_llm_status_get
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
       responses:
         '200':
           description: Successful Response
@@ -226,6 +322,7 @@ paths:
               schema:
                 type: object
                 title: Response Llm Status Llm Status Get
+                additionalProperties: true
         '422':
           description: Validation Error
           content:

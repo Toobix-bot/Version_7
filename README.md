@@ -2,6 +2,15 @@
 
 Self-Observing Life-Agent Development Environment (MVP).
 
+## Kurz erklärt
+Ein kleiner Server mit UI, der Pläne baut, sich selbst beobachtet und sich per Regeln steuern lässt. In der Web-UI siehst du Meta/LLM-Infos, eine Plan-Demo, einen LLM-Chat (sparsam) sowie Live-Bereiche für Events & Metrics.
+
+Wichtiges auf einen Blick:
+- OpenAPI-Doku: `/docs` (Header `X-API-Key` erforderlich)
+- Live-JSON: `/openapi.json` (enthält `servers` und Security-Schema)
+- Statische Spec: `docs/openapi.yaml` (für GitHub Pages / GPT Actions)
+- Dashboard: `/ui`
+
 ## Goals (MVP)
 - FastAPI service with endpoints: `POST /act`, `POST /turn`, `GET /state`, `GET /meta`, `GET /events` (SSE), `GET /metrics`, `POST /policy/reload`, `POST /plan`.
 - Observer decorator capturing timing, inputs/outputs, scores -> SQLite (events, proposals tables).
@@ -150,6 +159,9 @@ Enable Pages (GitHub → Settings → Pages): Branch `main`, folder `/docs`.
 Resulting URLs (example):
 - OpenAPI YAML: `https://toobix-bot.github.io/Version_7/openapi.yaml`
 - Landing: `https://toobix-bot.github.io/Version_7/`
+
+## Copilot Instructions
+See `copilot-instructions.md` for a PR roadmap (Plan-Varianten, PR-only flow, Idle-Game plugin, Telemetry, and tests/acceptance).
 
 ## Custom GPT (Actions) Integration
 

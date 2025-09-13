@@ -72,7 +72,7 @@ if os.getenv("ALLOW_TEST_TOKENS", "1") == "1":  # safe in dev; disable in prod v
 
 app = FastAPI(title="Life-Agent Dev Environment", version="0.1.0")
 
-# Custom OpenAPI builder: adds servers, security scheme, content-type fixes
+# Custom OpenAPI builder: adds servers, security scheme, content-type fixes, and schema hardening
 def custom_openapi():  # type: ignore
     if getattr(app, 'openapi_schema', None):  # cached
         return app.openapi_schema  # type: ignore[attr-defined]
@@ -81,6 +81,8 @@ def custom_openapi():  # type: ignore
         version=app.version,
         routes=app.routes,
     )
+    # Force OpenAPI version (robust for some Action builders)
+    schema["openapi"] = "3.0.3"
     # Servers (prefer env override)
     public_url = os.getenv("PUBLIC_SERVER_URL", "https://version-7.onrender.com")
     schema["servers"] = [{"url": public_url, "description": "Public server"}]
@@ -89,8 +91,34 @@ def custom_openapi():  # type: ignore
     if 'ApiKeyHeader' not in comps:
         comps['ApiKeyHeader'] = {"type": "apiKey", "in": "header", "name": "X-API-Key"}
     schema['security'] = [{"ApiKeyHeader": []}]
-    # Content-type corrections for streaming & metrics
+    # Iterate paths for request/response schema hardening
     paths = schema.get('paths', {})
+    for pth, methods in list(paths.items()):
+        for method, op in list(methods.items()):
+            if not isinstance(op, dict):
+                continue
+            # 3a) Shape /policy/reload requestBody into object { path?: string }
+            if pth == "/policy/reload" and "requestBody" in op:
+                try:
+                    content = op["requestBody"].get("content", {})
+                    if "application/json" in content:
+                        content["application/json"]["schema"] = {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string", "nullable": True}
+                            }
+                        }
+                except Exception:
+                    pass
+            # 3b) Harden 200 (and other) object responses lacking properties/additionalProperties
+            for resp_code, resp in op.get("responses", {}).items():
+                content = resp.get("content", {}) if isinstance(resp, dict) else {}
+                for ctype, c in content.items():
+                    sch = c.get("schema") if isinstance(c, dict) else None
+                    if isinstance(sch, dict) and sch.get("type") == "object":
+                        if "properties" not in sch and "additionalProperties" not in sch:
+                            sch["additionalProperties"] = True
+    # Content-type corrections for streaming & metrics
     if '/events' in paths and 'get' in paths['/events']:
         try:
             paths['/events']['get']['responses']['200']['content'] = {

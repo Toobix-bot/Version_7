@@ -1,0 +1,7 @@
+# Invalid on purpose: missing required fields and wrong types
+version: "1"
+# allowed_dirs missing entirely causes 422
+llm:
+  model: 123   # wrong type, must be string
+  temperature: -1  # out of range 0..1
+  max_tokens: 999999  # too large
