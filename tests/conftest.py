@@ -10,9 +10,16 @@ if str(ROOT) not in sys.path:
 import httpx  # noqa: E402
 import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402
+import asyncio  # noqa: E402
 from api.app import app  # noqa: E402
 
 os.environ.setdefault("API_TOKENS", "test-token")
+
+@pytest.fixture(scope="session")
+def event_loop():  # Reuse a single loop so global asyncio.Queue in app stays bound
+    loop = asyncio.new_event_loop()
+    yield loop
+    loop.close()
 
 @pytest.fixture(scope="session")
 def anyio_backend():

@@ -235,7 +235,16 @@ except Exception:
     pass
 
 state: Dict[str, Any] = {"agents": {}, "meta": {"version": app.version, "start": APP_START}}
-event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+# Event queue must be bound to the active loop; tests may recreate loops. Use a mapping per loop id.
+_event_queues: dict[int, asyncio.Queue[dict[str, Any]]] = {}
+
+def _get_event_queue() -> asyncio.Queue[dict[str, Any]]:
+    loop = asyncio.get_running_loop()
+    q = _event_queues.get(id(loop))
+    if q is None:
+        q = asyncio.Queue()
+        _event_queues[id(loop)] = q
+    return q
 policies: dict[str, Any] = {"loaded_at": time.time(), "rules": []}
 # ensure db_conn has an explicit typed declaration near top (if not already)
 try:
@@ -1118,7 +1127,7 @@ async def emit_event(kind: str, data: dict[str, Any]) -> None:
             db_conn.commit()
         except Exception:
             pass
-    await event_queue.put(record)
+    await _get_event_queue().put(record)
     # mark activity (exclude thought noise to allow idle auto ticks)
     global _last_activity_ts
     if not kind.startswith("thought."):
@@ -1180,7 +1189,7 @@ async def events_stream(request: Request, agent: str = Depends(require_auth)) ->
                 break
             now = time.time()
             try:
-                evt = await asyncio.wait_for(event_queue.get(), timeout=1.0)
+                evt = await asyncio.wait_for(_get_event_queue().get(), timeout=1.0)
                 payload = f"event: {evt['kind']}\ndata: {json.dumps(evt)}\n\n".encode()
                 yield payload
             except asyncio.TimeoutError:
