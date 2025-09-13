@@ -16,7 +16,7 @@ from typing import Any, AsyncGenerator, Dict, Callable, Awaitable, TypeVar, Coro
 from fastapi import FastAPI, Depends, HTTPException, status, Request, Header, Body, Query
 from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import StreamingResponse, PlainTextResponse, RedirectResponse, HTMLResponse
 from fastapi.security import APIKeyHeader, HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -70,6 +70,18 @@ if _test_token:
 # Include common test tokens (used by test suite) unless explicitly disabled
 if os.getenv("ALLOW_TEST_TOKENS", "1") == "1":  # safe in dev; disable in prod via env
     API_TOKENS.update({"test", "test-token"})
+
+# Early auth dependency (placed early so that later endpoint definitions referencing require_auth do not raise NameError).
+# The more elaborate security section further below re-defines the same function (idempotent logic) to keep original structure.
+from fastapi import Header  # already imported above, safe re-import for clarity
+async def require_auth(x_api_key: str | None = Header(None, alias="X-API-Key")) -> str:  # type: ignore[override]
+    if KILL_SWITCH.lower() == "on":
+        raise HTTPException(status_code=503, detail={"error": {"code": "kill_switch", "message": "Service disabled"}})
+    if not x_api_key:
+        raise HTTPException(status_code=401, detail={"error": {"code": "missing_api_key", "message": "X-API-Key header required"}})
+    if x_api_key not in API_TOKENS:
+        raise HTTPException(status_code=401, detail={"error": {"code": "invalid_api_key", "message": "X-API-Key invalid"}})
+    return "default-agent"
 
 app = FastAPI(title="Life-Agent Dev Environment", version="0.1.0")
 
@@ -406,108 +418,25 @@ class QuestItem(BaseModel):
 class QuestListResponse(BaseModel):
     items: list[QuestItem]
 
-# ---------------- Story / Narrative Models (MVP Phase 1) ----------------
-class StoryOption(BaseModel):
-    id: str
-    label: str
-    rationale: str | None = None
-    risk: int = 0  # 0–3
-    expected: dict[str, int] | None = None
-    tags: list[str] = []
-    expires_at: float | None = None
-
-class StoryEvent(BaseModel):
-    id: str
-    ts: float
-    epoch: int
-    kind: str  # tick|action|system
-    text: str
-    mood: str
-    deltas: dict[str, int] | None = None
-    tags: list[str] = []
-    option_ref: str | None = None
-
-class StoryState(BaseModel):
-    epoch: int
-    mood: str
-    arc: str
-    resources: dict[str, int]
-    options: list[StoryOption] = []
-
-# --- Arc Evaluation (simple progression) ---
-_ARC_ORDER = ["foundations", "exploration", "mastery"]
-
-def _eval_arc(resources: dict[str,int], current: str) -> str:
-    lvl = resources.get("level",1)
-    # simple thresholds
-    if lvl >= 10:
-        return "mastery"
-    if lvl >= 3:
-        return "exploration"
-    return "foundations"
-
-def _maybe_arc_shift(conn: sqlite3.Connection, prev_arc: str, new_arc: str, epoch: int, mood: str) -> StoryEvent | None:
-    if new_arc == prev_arc:
-        return None
-    ev_id = f"sev_{int(_story_now()*1000)}"
-    text = f"Arc-Wechsel: {prev_arc} -> {new_arc}"
-    conn.execute(
-        "INSERT INTO story_events(ts, epoch, kind, text, mood, deltas, tags, option_ref) VALUES (?,?,?,?,?,?,?,?)",
-        (_story_now(), epoch, "arc_shift", text, mood, json.dumps({}), json.dumps(["arc_shift"]), None)
-    )
-    return StoryEvent(id=ev_id, ts=_story_now(), epoch=epoch, kind="arc_shift", text=text, mood=mood, deltas={}, tags=["arc_shift"], option_ref=None)
-
-# Default resources baseline
-# Story Ressource Keys (deutsch)
-# energie, wissen, inspiration, ruf, stabilitaet, erfahrung, level
-_STORY_RESOURCE_KEYS = [
-    "energie",
-    "wissen",
-    "inspiration",
-    "ruf",
-    "stabilitaet",
-    "erfahrung",
-    "level",
-]
-_STORY_OLD_KEY_MAP = {
-    "energy": "energie",
-    "knowledge": "wissen",
-    "inspiration": "inspiration",
-    "reputation": "ruf",
-    "stability": "stabilitaet",
-    "xp": "erfahrung",
-    "level": "level",
-}
+from .story_core import (
+    StoryOption, StoryEvent, StoryState,
+    Companion, CompanionCreate, Buff, BuffCreate, Skill, SkillCreate,
+    eval_arc as _core_eval_arc,
+    maybe_arc_shift as _core_maybe_arc_shift,
+    get_story_state as _get_story_state,
+    list_story_options as _list_story_options,
+    generate_story_options as _generate_story_options,
+    persist_options as _persist_options,
+    refresh_story_options as _refresh_story_options,
+    apply_story_option as _apply_story_option,
+    story_tick as _story_tick,
+    fetch_events as _story_log,
+)
 
 def _story_now() -> float:
     return time.time()
 
-def _get_story_state(conn: sqlite3.Connection) -> StoryState:
-    cur = conn.execute("SELECT epoch, mood, arc, resources FROM story_state WHERE id=1")
-    row = cur.fetchone()
-    if not row:
-        # initialize
-        resources = {k: 0 for k in _STORY_RESOURCE_KEYS}
-        resources.update({"energie": 80, "stabilitaet": 80, "level": 1})
-        conn.execute(
-            "INSERT INTO story_state(id, ts, epoch, mood, arc, resources) VALUES (1, ?, ?, ?, ?, ?)",
-            (_story_now(), 0, "calm", "foundations", json.dumps(resources)),
-        )
-        conn.commit()
-        return StoryState(epoch=0, mood="calm", arc="foundations", resources=resources, options=[])
-    epoch, mood, arc, resources_json = row
-    resources = json.loads(resources_json)
-    # backward compatibility mapping englische keys -> deutsch
-    migrated = False
-    for old, new in _STORY_OLD_KEY_MAP.items():
-        if old in resources:
-            resources[new] = resources.get(new, 0) + resources.pop(old)
-            migrated = True
-    if migrated:
-        conn.execute("UPDATE story_state SET resources=? WHERE id=1", (json.dumps(resources),))
-        conn.commit()
-    options = _list_story_options(conn)
-    return StoryState(epoch=epoch, mood=mood, arc=arc, resources=resources, options=options)
+## Story logic now imported from story_core
 
 def _list_story_options(conn: sqlite3.Connection) -> list[StoryOption]:
     cur = conn.execute("SELECT id, label, rationale, risk, expected, tags, expires_at FROM story_options ORDER BY created_at DESC")
@@ -642,11 +571,11 @@ def _apply_story_option(conn: sqlite3.Connection, state: StoryState, option_id: 
     if deltas.get("inspiration",0) > 0:
         mood = "curious"
     # possible arc shift before commit
-    new_arc = _eval_arc(new_resources, state.arc)
+    new_arc = _core_eval_arc(new_resources, state.arc)
     conn.execute("UPDATE story_state SET ts=?, epoch=?, mood=?, arc=?, resources=? WHERE id=1", (_story_now(), epoch, mood, new_arc, json.dumps(new_resources)))
     ev_id = f"sev_{int(_story_now()*1000)}"
     conn.execute("INSERT INTO story_events(ts, epoch, kind, text, mood, deltas, tags, option_ref) VALUES (?,?,?,?,?,?,?,?)", (_story_now(), epoch, "action", label, mood, json.dumps(deltas), json.dumps(["action"]), option_id))
-    arc_event = _maybe_arc_shift(conn, state.arc, new_arc, epoch, mood)
+    arc_event = _core_maybe_arc_shift(conn, state.arc, new_arc, epoch, mood)
     # refresh options after action
     conn.execute("DELETE FROM story_options")
     conn.commit()
@@ -662,7 +591,7 @@ def _story_tick(conn: sqlite3.Connection) -> StoryEvent:
     mood = state.mood
     if resources.get("energie",0) < 30:
         mood = "strained"
-    new_arc = _eval_arc(resources, state.arc)
+    new_arc = _core_eval_arc(resources, state.arc)
     conn.execute("UPDATE story_state SET ts=?, epoch=?, mood=?, arc=?, resources=? WHERE id=1", (_story_now(), epoch, mood, new_arc, json.dumps(resources)))
     ev_id = f"sev_{int(_story_now()*1000)}"
     text = "Zeit vergeht. Eine stille Verschiebung im inneren Raum."
@@ -670,7 +599,7 @@ def _story_tick(conn: sqlite3.Connection) -> StoryEvent:
         "INSERT INTO story_events(ts, epoch, kind, text, mood, deltas, tags, option_ref) VALUES (?,?,?,?,?,?,?,?)",
         (_story_now(), epoch, "tick", text, mood, json.dumps({"energie": -1}), json.dumps(["tick"]), None),
     )
-    _maybe_arc_shift(conn, state.arc, new_arc, epoch, mood)
+    _core_maybe_arc_shift(conn, state.arc, new_arc, epoch, mood)
     # regenerate options occasionally
     _refresh_story_options(conn, StoryState(epoch=epoch, mood=mood, arc=state.arc, resources=resources, options=[]))
     conn.commit()
@@ -709,12 +638,6 @@ def _record_story_event(ev: StoryEvent) -> None:  # type: ignore[override]
         pass
 
 # ---------------- Story API Endpoints -----------------
-# (require_auth defined later; provide lightweight forwarder for type check/import)
-try:
-    require_auth  # type: ignore[name-defined]
-except NameError:
-    async def require_auth(x_api_key: str | None = Header(None, alias="X-API-Key")) -> str:  # type: ignore
-        return "default-agent"
 
 @app.get("/story/state", response_model=StoryState)
 async def story_get_state(agent: str = Depends(require_auth)) -> StoryState:  # type: ignore[override]
@@ -814,6 +737,80 @@ async def story_options_regen(agent: str = Depends(require_auth)) -> list[StoryO
     await emit_event("story.state", {"options": len(opts)})
     return opts
 
+# ---------------- Meta Resource Endpoints ----------------
+
+@app.get("/story/meta/companions", response_model=list[Companion])
+async def story_meta_companions(agent: str = Depends(require_auth)) -> list[Companion]:  # type: ignore[override]
+    rate_limit(agent)
+    rows = db_conn.execute("SELECT id,name,archetype,mood,stats,acquired_at FROM story_companions ORDER BY id ASC").fetchall()  # type: ignore[arg-type]
+    out: list[Companion] = []
+    for r in rows:
+        cid,name,arch,mood,stats_json,acq = r
+        try: stats = json.loads(stats_json) if stats_json else {}
+        except Exception: stats = {}
+        out.append(Companion(id=cid,name=name,archetype=arch,mood=mood,stats=stats,acquired_at=acq))
+    return out
+
+@app.post("/story/meta/companions", response_model=Companion, status_code=201)
+async def story_meta_companions_create(req: CompanionCreate, agent: str = Depends(require_auth)) -> Companion:  # type: ignore[override]
+    rate_limit(agent)
+    now = time.time()
+    stats_json = json.dumps(req.stats or {})
+    cur = db_conn.execute("INSERT INTO story_companions(name,archetype,mood,stats,acquired_at) VALUES (?,?,?,?,?)", (req.name, req.archetype, req.mood, stats_json, now))  # type: ignore[arg-type]
+    db_conn.commit()
+    cid = cur.lastrowid
+    comp = Companion(id=cid, name=req.name, archetype=req.archetype, mood=req.mood, stats=req.stats or {}, acquired_at=now)
+    await emit_event("story.meta.companion.add", comp.model_dump())
+    await emit_event("story.state", {"meta":"companions"})
+    return comp
+
+@app.get("/story/meta/buffs", response_model=list[Buff])
+async def story_meta_buffs(agent: str = Depends(require_auth)) -> list[Buff]:  # type: ignore[override]
+    rate_limit(agent)
+    rows = db_conn.execute("SELECT id,label,kind,magnitude,expires_at,meta FROM story_buffs ORDER BY id ASC").fetchall()  # type: ignore[arg-type]
+    out: list[Buff] = []
+    for r in rows:
+        bid,label,kind,mag,exp,meta_json = r
+        try: meta = json.loads(meta_json) if meta_json else {}
+        except Exception: meta = {}
+        out.append(Buff(id=bid,label=label,kind=kind,magnitude=mag,expires_at=exp,meta=meta))
+    return out
+
+@app.post("/story/meta/buffs", response_model=Buff, status_code=201)
+async def story_meta_buffs_create(req: BuffCreate, agent: str = Depends(require_auth)) -> Buff:  # type: ignore[override]
+    rate_limit(agent)
+    cur = db_conn.execute("INSERT INTO story_buffs(label,kind,magnitude,expires_at,meta) VALUES (?,?,?,?,?)", (req.label, req.kind, req.magnitude, req.expires_at, json.dumps(req.meta or {})))  # type: ignore[arg-type]
+    db_conn.commit()
+    bid = cur.lastrowid
+    buff = Buff(id=bid,label=req.label,kind=req.kind,magnitude=req.magnitude,expires_at=req.expires_at,meta=req.meta or {})
+    await emit_event("story.meta.buff.add", buff.model_dump())
+    await emit_event("story.state", {"meta":"buffs"})
+    return buff
+
+@app.get("/story/meta/skills", response_model=list[Skill])
+async def story_meta_skills(agent: str = Depends(require_auth)) -> list[Skill]:  # type: ignore[override]
+    rate_limit(agent)
+    rows = db_conn.execute("SELECT id,name,level,xp,category,updated_at FROM story_skills ORDER BY id ASC").fetchall()  # type: ignore[arg-type]
+    out: list[Skill] = []
+    for r in rows:
+        sid,name,lvl,xp,cat,upd = r
+        out.append(Skill(id=sid,name=name,level=lvl,xp=xp,category=cat,updated_at=upd))
+    return out
+
+@app.post("/story/meta/skills", response_model=Skill, status_code=201)
+async def story_meta_skills_create(req: SkillCreate, agent: str = Depends(require_auth)) -> Skill:  # type: ignore[override]
+    rate_limit(agent)
+    now = time.time()
+    level = req.level if (req.level and req.level>0) else 1
+    xp = req.xp if req.xp is not None and req.xp>=0 else 0
+    cur = db_conn.execute("INSERT INTO story_skills(name,level,xp,category,updated_at) VALUES (?,?,?,?,?)", (req.name, level, xp, req.category, now))  # type: ignore[arg-type]
+    db_conn.commit()
+    sid = cur.lastrowid
+    skill = Skill(id=sid,name=req.name,level=level,xp=xp,category=req.category,updated_at=now)
+    await emit_event("story.meta.skill.add", skill.model_dump())
+    await emit_event("story.state", {"meta":"skills"})
+    return skill
+
 # ---------------- Database ----------------
 def init_db() -> None:
     global db_conn
@@ -895,9 +892,73 @@ def init_db() -> None:
             tags TEXT, -- JSON array
             expires_at REAL
         );
+        CREATE TABLE IF NOT EXISTS story_companions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            archetype TEXT,
+            mood TEXT,
+            stats TEXT, -- JSON
+            acquired_at REAL NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS story_buffs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            label TEXT NOT NULL,
+            kind TEXT,
+            magnitude INTEGER,
+            expires_at REAL,
+            meta TEXT
+        );
+        CREATE TABLE IF NOT EXISTS story_skills (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            level INTEGER NOT NULL,
+            xp INTEGER NOT NULL,
+            category TEXT,
+            updated_at REAL NOT NULL
+        );
         """
     )
     db_conn.commit()
+    # seed meta resources if empty
+    try:
+        cur = db_conn.execute("SELECT COUNT(*) FROM story_companions")
+        if cur.fetchone()[0] == 0:
+            now = time.time()
+            companion_sets = [
+                [
+                    ("Mentor", "weise", "ruhig", {"bonus_wissen":5,"empatie":3}),
+                    ("Späher", "wendig", "wachsam", {"sicht":7,"tempo":2}),
+                ],
+                [
+                    ("Alte KI", "analytisch", "neutral", {"analyse":8,"latenz":1}),
+                    ("Muse", "kreativ", "inspirierend", {"inspiration":10}),
+                ],
+                [
+                    ("Wächter", "defensiv", "fokussiert", {"schutz":6,"standhaft":4}),
+                ],
+            ]
+            # choose first set for initial seed; others available for future expansion endpoints
+            for name, archetype, mood, stats in companion_sets[0]:
+                db_conn.execute("INSERT INTO story_companions(name,archetype,mood,stats,acquired_at) VALUES (?,?,?,?,?)", (name, archetype, mood, json.dumps(stats), now))
+        cur = db_conn.execute("SELECT COUNT(*) FROM story_skills")
+        if cur.fetchone()[0] == 0:
+            skill_sets = [
+                [ ("fokus",1,0,"mental"), ("reflexion",1,0,"meta"), ("ideenfindung",1,0,"kreativ") ],
+                [ ("analyse",1,0,"wissen"), ("exploration",1,0,"pfad"), ("konzentration",1,0,"mental") ],
+            ]
+            for name,lvl,xp,cat in skill_sets[0]:
+                db_conn.execute("INSERT INTO story_skills(name,level,xp,category,updated_at) VALUES (?,?,?,?,?)", (name,lvl,xp,cat,time.time()))
+        cur = db_conn.execute("SELECT COUNT(*) FROM story_buffs")
+        if cur.fetchone()[0] == 0:
+            buff_sets = [
+                [ ("klarheit","geist",5, now + 3600, {"beschreibung":"Gedanken sind geordnet"}), ("flow","tempo",3, now + 900, {"beschreibung":"Erhöhte kreative Durchsatzrate"}) ],
+                [ ("ruhe","regeneration",2, now + 1200, {"beschreibung":"Langsame Erholung"}) ]
+            ]
+            for label,kind,mag,exp,meta in buff_sets[0]:
+                db_conn.execute("INSERT INTO story_buffs(label,kind,magnitude,expires_at,meta) VALUES (?,?,?,?,?)", (label,kind,mag,exp,json.dumps(meta)))
+        db_conn.commit()
+    except Exception:
+        pass
 
 current_policy: Policy | None = None
 # modify load_policies to use schema
@@ -1107,6 +1168,101 @@ async def metrics() -> PlainTextResponse:
     data = generate_latest(REGISTRY)
     return PlainTextResponse(data, media_type=CONTENT_TYPE_LATEST)
 
+# ---------- Minimal Story UI (inline) ----------
+@app.get("/story/ui")
+async def story_ui() -> HTMLResponse:  # type: ignore[override]
+        html = """<!DOCTYPE html><html lang=de><head><meta charset=utf-8><title>Story</title>
+<style>
+body{font-family:system-ui,Segoe UI,Arial,sans-serif;margin:16px;background:#0f1115;color:#f2f2f2}
+section{margin-bottom:18px;padding:12px;background:#1b1f27;border:1px solid #2c333f;border-radius:8px}
+h2{margin:4px 0 12px;font-size:18px}
+button{background:#2563eb;color:#fff;border:0;padding:6px 12px;margin:4px 4px 4px 0;border-radius:4px;cursor:pointer;font-size:13px}
+button.secondary{background:#374151}
+code{font-size:12px;background:#111722;padding:2px 4px;border-radius:4px}
+.opts button{display:block;width:100%;text-align:left}
+.log-item{margin:0 0 4px;line-height:1.25}
+.kind-action{color:#10b981}.kind-tick{color:#9ca3af}.kind-arc_shift{color:#f59e0b}
+.flex{display:flex;gap:16px;flex-wrap:wrap}
+.col{flex:1 1 300px;min-width:280px}
+input[type=text]{width:100%;padding:6px;background:#111722;color:#fff;border:1px solid #2c333f;border-radius:4px}
+.res-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;margin-top:8px}
+.res{background:#111722;padding:6px;border:1px solid #2a3140;border-radius:6px;font-size:11px}
+.bar{height:6px;border-radius:3px;background:#222;margin-top:4px;overflow:hidden;position:relative}
+.bar span{display:block;height:100%;background:linear-gradient(90deg,#2563eb,#38bdf8)}
+.res[data-k="energie"] .bar span{background:linear-gradient(90deg,#f59e0b,#fbbf24)}
+.res[data-k="wissen"] .bar span{background:linear-gradient(90deg,#6366f1,#8b5cf6)}
+.res[data-k="inspiration"] .bar span{background:linear-gradient(90deg,#ec4899,#f472b6)}
+.res[data-k="ruf"] .bar span{background:linear-gradient(90deg,#0ea5e9,#06b6d4)}
+.res[data-k="stabilitaet"] .bar span{background:linear-gradient(90deg,#10b981,#34d399)}
+.res[data-k="erfahrung"] .bar span{background:linear-gradient(90deg,#9333ea,#a855f7)}
+.res[data-k="level"] .bar span{background:linear-gradient(90deg,#ef4444,#f87171)}
+</style></head><body>
+<h1>Story <small id=sseStatus style='font-size:12px;color:#888'>[SSE: init]</small></h1>
+<div class=flex>
+ <div class=col>
+    <section id=stateSec><h2>Zustand</h2><div id=stateBox>lade...</div>
+        <div id=metaWrap style='margin-top:12px'>
+            <details open><summary style='cursor:pointer'>Gefährten</summary><div id=companionsBox style='font-size:12px;margin-top:4px'></div></details>
+            <details open><summary style='cursor:pointer'>Buffs</summary><div id=buffsBox style='font-size:12px;margin-top:4px'></div></details>
+            <details open><summary style='cursor:pointer'>Skills</summary><div id=skillsBox style='font-size:12px;margin-top:4px'></div></details>
+        </div>
+    </section>
+    <section><h2>Aktion</h2>
+        <div class=opts id=optsBox></div>
+        <input id=freeText placeholder="Freitext Aktion" />
+        <button id=btnFree>Freitext senden</button>
+        <button class=secondary id=btnAdvance>Zeit voranschreiten</button>
+        <button class=secondary id=btnRegen>Optionen neu</button>
+    </section>
+ </div>
+ <div class=col>
+        <section><h2>Log</h2>
+            <input id=logFilter placeholder="Filter (Regex / Text)" style="margin-bottom:6px;width:100%;padding:4px 6px;background:#111722;color:#eee;border:1px solid #2c333f;border-radius:4px;font-size:12px" />
+            <div id=logBox style="max-height:520px;overflow:auto;font-size:12px"></div>
+        </section>
+ </div>
+</div>
+<script>
+const apiKey = localStorage.getItem('api_key') || prompt('API Key?'); if(apiKey) localStorage.setItem('api_key', apiKey);
+const H = {'X-API-Key': apiKey};
+function j(el, html){document.getElementById(el).innerHTML=html}
+function fetchJSON(p,opt={}){opt.headers={...(opt.headers||{}),...H,'Content-Type':'application/json'};return fetch(p,opt).then(r=>{if(!r.ok) throw new Error(r.status); return r.json()})}
+function fmtResBlocks(r){const maxMap={energie:100,wissen:200,inspiration:100,ruf:100,stabilitaet:100,erfahrung:1000,level:20};return '<div class="res-list">'+Object.entries(r).map(([k,v])=>{const max=maxMap[k]||100;const pct=Math.min(100,Math.round((v/max)*100));return `<div class='res' data-k='${k}'><div><b>${k}</b> <span style='float:right'>${v}</span></div><div class='bar'><span style='width:${pct}%'></span></div></div>`}).join('')+'</div>'}
+function renderCompanions(list){const box=document.getElementById('companionsBox'); if(!list||!list.length){box.textContent='(keine)';return;} box.innerHTML=list.map(c=>`<div><b>${c.name}</b> <small>${c.archetype||''}</small> – ${c.mood||''} ${c.stats?'<code>'+Object.entries(c.stats).map(([k,v])=>k+':'+v).join(', ')+'</code>':''}</div>`).join('')}
+function renderBuffs(list){const now=Date.now()/1000;const box=document.getElementById('buffsBox'); if(!list||!list.length){box.textContent='(keine)';return;} box.innerHTML=list.map(b=>{const rem=b.expires_at?Math.max(0,Math.round(b.expires_at-now)):null; return `<div><b>${b.label}</b> <small>${b.kind||''}</small> ${b.magnitude!=null?('['+b.magnitude+']'):''} ${rem!=null?(' <span style=color:#f59e0b>'+rem+'s</span>'):''}</div>`}).join('')}
+function renderSkills(list){const box=document.getElementById('skillsBox'); if(!list||!list.length){box.textContent='(keine)';return;} box.innerHTML=list.map(s=>`<div><b>${s.name}</b> Lv ${s.level} <small>${s.category||''}</small> <span style='opacity:.6'>xp:${s.xp}</span></div>`).join('')}
+function loadState(){fetchJSON('/story/state').then(st=>{j('stateBox',`Arc: <b>${st.arc}</b><br>Mood: ${st.mood}<br>Epoch: ${st.epoch}<br>${fmtResBlocks(st.resources)}`);renderCompanions(st.companions);renderBuffs(st.buffs);renderSkills(st.skills);renderOpts(st.options)}).catch(e=>console.error(e))}
+function renderOpts(opts){const box=document.getElementById('optsBox');box.innerHTML=''; if(!opts.length){box.textContent='(keine)';return} opts.forEach(o=>{const b=document.createElement('button'); b.textContent=`${o.label}`; b.onclick=()=>act(o.id); box.appendChild(b)})}
+function loadLog(){fetchJSON('/story/log?limit=80').then(events=>{const box=document.getElementById('logBox'); box.innerHTML=events.map(e=>`<div class='log-item kind-${e.kind}'>[${e.epoch}] <span>${e.kind}</span>: ${e.text}</div>`).join('')}).catch(e=>{})}
+function act(id){fetchJSON('/story/action',{method:'POST',body:JSON.stringify({option_id:id})}).then(e=>{loadState();prependLog(e)})}
+function free(){const t=document.getElementById('freeText').value.trim(); if(!t) return; fetchJSON('/story/action',{method:'POST',body:JSON.stringify({free_text:t})}).then(e=>{document.getElementById('freeText').value=''; loadState(); prependLog(e)})}
+function advance(){fetchJSON('/story/advance',{method:'POST'}).then(e=>{loadState();prependLog(e)})}
+function regen(){fetchJSON('/story/options/regen',{method:'POST'}).then(_=>loadState())}
+function prependLog(ev){const box=document.getElementById('logBox'); const div=document.createElement('div');div.className='log-item kind-'+ev.kind; div.innerHTML=`[${ev.epoch}] <span>${ev.kind}</span>: ${ev.text}`; box.prepend(div)}
+document.getElementById('btnFree').onclick=free; document.getElementById('btnAdvance').onclick=advance; document.getElementById('btnRegen').onclick=regen;
+loadState(); loadLog();
+// SSE
+let es; let esRetry=0; const maxRetry=10; const statusEl=document.getElementById('sseStatus');
+function sseSet(st, color){ if(statusEl){ statusEl.textContent='[SSE: '+st+']'; statusEl.style.color=color||'#888'; } }
+function startSSE(){
+    try{ if(es){ es.close(); }
+        es = new EventSource('/events',{withCredentials:false});
+        sseSet('verbunden','#10b981'); esRetry=0;
+        es.addEventListener('open',()=>sseSet('offen','#10b981'));
+        es.onmessage=()=>{};
+        es.addEventListener('story.state',()=>{loadState()});
+        es.addEventListener('story.event',()=>{loadLog()});
+        es.onerror=()=>{ es.close(); sseSet('getrennt','#f59e0b'); if(esRetry<maxRetry){ const t = Math.min(10000, 500 * Math.pow(1.6, esRetry)); esRetry++; setTimeout(startSSE,t);} else { sseSet('fail','#ef4444'); } };
+    }catch(e){ console.warn('SSE fail',e); sseSet('fehler','#ef4444'); }
+}
+startSSE();
+setInterval(()=>{loadState();},20000);
+// Log Filter
+document.getElementById('logFilter').addEventListener('input',()=>{ const v = document.getElementById('logFilter').value.trim(); const items=[...document.querySelectorAll('#logBox .log-item')]; let rx=null; try{ rx = v? new RegExp(v,'i'):null;}catch(_){rx=null;} items.forEach(it=>{ const txt=it.textContent||''; it.style.display = !v? '' : (rx? (rx.test(txt)?'':'none') : (txt.toLowerCase().includes(v.toLowerCase())?'':'none')); }); });
+</script>
+</body></html>"""
+        return HTMLResponse(content=html)
+
 
 @app.post("/policy/reload")
 async def policy_reload(agent: str = Depends(require_auth), path: str | None = Body(default=None)) -> dict[str, Any]:
@@ -1270,8 +1426,21 @@ async def plan(req: PlanRequest, agent: str = Depends(require_auth), risk_budget
     )
 
 @app.get("/")
-async def root() -> RedirectResponse:
-    return RedirectResponse(url="/ui")
+async def root() -> HTMLResponse:  # type: ignore[override]
+    html = """<html><head><title>Index</title><meta charset='utf-8'>
+<style>body{font-family:system-ui;background:#0f1115;color:#f5f5f5;padding:32px}a{color:#60a5fa;text-decoration:none;font-weight:600}ul{line-height:1.6}code{background:#1e2530;padding:2px 5px;border-radius:4px}</style></head>
+<body>
+<h1>Übersicht</h1>
+<p>Wichtige Bereiche:</p>
+<ul>
+ <li><a href='/ui'>Haupt-UI</a></li>
+ <li><a href='/story/ui'>Story</a> (lebendiges Erzählsystem)</li>
+ <li><a href='/docs'>OpenAPI Docs</a></li>
+ <li><a href='/metrics'>Prometheus Metriken</a></li>
+</ul>
+<p>Setze ggf. zuerst deinen <code>API Key</code> in der Haupt-UI; die Story-UI nutzt lokal gespeicherten Schlüssel.</p>
+</body></html>"""
+    return HTMLResponse(content=html)
 
 @app.post("/llm/chat", response_model=ChatResponse)
 async def llm_chat(req: ChatRequest, agent: str = Depends(require_auth)):

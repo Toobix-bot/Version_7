@@ -9,28 +9,44 @@ init_db()
 headers = {"X-API-Key": API_KEY}
 
 def test_arc_shift_on_level():
-    # force experience high enough for level up threshold (level 1 -> exploration after level 3, but we test leveling steps)
-    # seed erfahrung to 300 and level to 2 so multiple shifts possible
+    # 1. Set initial level below threshold (foundations) then jump to exploration threshold (>=3) and then mastery (>=10)
     conn = sqlite3.connect(DB_PATH)
     cur = conn.execute("SELECT resources FROM story_state WHERE id=1")
-    row = cur.fetchone()
-    assert row
+    row = cur.fetchone(); assert row
     resources = json.loads(row[0])
-    resources['erfahrung'] = 300
-    resources['level'] = 2
+    resources['level'] = 1
     conn.execute("UPDATE story_state SET resources=? WHERE id=1", (json.dumps(resources),))
     conn.commit()
     conn.close()
 
-    # regenerate options and find level up option (expected deltas include level +1)
-    client.post('/story/options/regen', headers=headers)
-    opts = client.get('/story/options', headers=headers).json()
-    level_opts = [o for o in opts if 'Level-Aufstieg' in o['label'] or 'Level' in o['label']]
-    if level_opts:
-        opt_id = level_opts[0]['id']
-        client.post('/story/action', headers=headers, json={'option_id': opt_id})
+    # trigger tick to capture baseline arc
+    client.post('/story/advance', headers=headers)
+    log1 = client.get('/story/log', headers=headers).json()
+    baseline_arc_events = [e for e in log1 if e['kind']=='arc_shift']
+    # may be empty (already foundations) but should not show exploration yet
 
-    # fetch log and ensure arc_shift appears if level high enough for exploration/mastery
-    log = client.get('/story/log', headers=headers).json()
-    kinds = [e['kind'] for e in log]
-    assert 'arc_shift' in kinds or True  # non-fatal if threshold not crossed yet
+    # 2. Raise to level 3 -> expect arc shift to exploration
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute("SELECT resources FROM story_state WHERE id=1")
+    row = cur.fetchone(); assert row
+    resources = json.loads(row[0])
+    resources['level'] = 3
+    conn.execute("UPDATE story_state SET resources=? WHERE id=1", (json.dumps(resources),))
+    conn.commit(); conn.close()
+    client.post('/story/advance', headers=headers)
+    log2 = client.get('/story/log', headers=headers).json()
+    arc_shift_to_exploration = [e for e in log2 if e['kind']=='arc_shift' and 'exploration' in e['text']]
+    assert arc_shift_to_exploration, "Erwarteter Arc-Shift zu exploration fehlte"
+
+    # 3. Raise to level 10 -> expect arc shift to mastery
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute("SELECT resources FROM story_state WHERE id=1")
+    row = cur.fetchone(); assert row
+    resources = json.loads(row[0])
+    resources['level'] = 10
+    conn.execute("UPDATE story_state SET resources=? WHERE id=1", (json.dumps(resources),))
+    conn.commit(); conn.close()
+    client.post('/story/advance', headers=headers)
+    log3 = client.get('/story/log', headers=headers).json()
+    arc_shift_to_mastery = [e for e in log3 if e['kind']=='arc_shift' and 'mastery' in e['text']]
+    assert arc_shift_to_mastery, "Erwarteter Arc-Shift zu mastery fehlte"

@@ -72,6 +72,7 @@ Wichtige Endpoints (GET/POST):
 - `/thought/stream` (kategorisierter Gedankenverlauf)
 - `/env/info`
 - Plugin: `/game/idle/state`, `/game/idle/tick`
+- Story Meta: `/story/meta/companions`, `/story/meta/buffs`, `/story/meta/skills` (GET & POST)
 
 Kern-Metriken:
 - `plan_seconds` Histogram → Plan-Latenzen
@@ -435,17 +436,23 @@ Ein persistenter narrativer Zustand, der sich über Aktionen und Zeit entwickelt
 - `POST /story/action` `{ option_id? , free_text? }` → Wendet Option an ODER erzeugt Freitext-Aktion (leichter Inspiration+ Energie-Tradeoff).
 - `POST /story/advance` → Zeit-Fortschritt (passiver Tick, Energie-Decay, Option-Refresh, LLM-Erzähl-Satz).
 - `POST /story/options/regen` → Forciert Regeneration (Heuristik neu, z.B. nach externen State-Änderungen).
+- `GET /story/meta/companions|buffs|skills` → Aktuelle Meta-Ressourcen (persistente Erweiterungen des Zustands).
+- `POST /story/meta/companions` `{ name, archetype?, mood?, stats? }` → Neuen Begleiter einfügen.
+- `POST /story/meta/buffs` `{ label, kind?, magnitude?, expires_at?, meta? }` → Temporären Buff einfügen.
+- `POST /story/meta/skills` `{ name, category?, level?, xp? }` → Skill anlegen (Default level=1,xp=0).
 
 Alle POST-Operationen benötigen `X-API-Key`.
 
 ### Eventtypen (StoryEvent.kind)
 - `action` (aus gewählter Option oder Freitext)
 - `tick` (Zeitverlauf)
-- (geplant) `milestone`, `arc_shift`, `level_up`
+- `arc_shift` (Arc-Wechsel durch Level-Schwelle)
+- (geplant) `milestone`, `level_up`
 
 ### SSE Events
 - `story.event` → Payload = StoryEvent
 - `story.state` → z.Z. Minimal (epoch / option count). Erweiterbar für UI Instant-Refresh.
+- `story.meta.*` → Bei CRUD Aktionen: `story.meta.companion.add`, `story.meta.buff.add`, `story.meta.skill.add` (liefert jeweiliges Objekt)
 
 ### Heuristische Optionen (MVP)
 Regeln (vereinfachte Beispiele):
@@ -483,13 +490,54 @@ SQLite Tabellen:
 - `story_state(id=1)` – Singleton (epoch, mood, arc, resources JSON)
 - `story_events` – Verlauf
 - `story_options` – Kurzlebige aktuelle Auswahl
+- `story_companions` – Persistente Begleiter (name, archetype, mood, stats JSON)
+- `story_buffs` – Temporäre Modifikatoren (label, kind, magnitude, expires_at, meta JSON)
+- `story_skills` – Skills mit Fortschritt (name, level, xp, category)
 
 ### Geplante Erweiterungen
-- Arc-System (Kapitel / Themenwechsel) + `arc_shift` Events
-- Skill-/Buff-Mechanik (Temporäre Modifikatoren Ressourcen-Delta)
+- Erweiterte Arc-Narration (adaptive Texte pro Arc)
+- Buff-Expiry-Verarbeitung & automatische Entfernung abgelaufener Buffs
+- Skill-XP Zuwachs über Aktionen (automatische Progression)
 - Option-Scoring & Risikoexplizierung
 - LLM Prompt Feintuning (Kontextkompression, Mood-Einflüsse)
 - Option TTL / automatische Veralterung
 - Tests: Edge-Cases (Level-Up, mehrfacher Tick ohne Aktionen, Migration alter englischer Keys)
+
+### Meta Ressourcen Details
+
+Die Meta-Ressourcen erweitern den narrativen Zustand um längerfristige Progressionselemente, die unabhängig von kurzfristigen Ressourcen wirken.
+
+| Typ | Endpoint (GET/POST) | Primäre Felder | Beschreibung |
+|-----|---------------------|----------------|--------------|
+| Companion | `/story/meta/companions` | name, archetype, mood, stats{} | Dauerhafte Gefährten mit frei strukturierbaren Stats (JSON) |
+| Buff | `/story/meta/buffs` | label, kind, magnitude, expires_at, meta{} | Zeitlich begrenzte Effekte (Client kann nach Ablauf filtern; zukünftige automatische Purge geplant) |
+| Skill | `/story/meta/skills` | name, level, xp, category | Fortschrittsfähigkeiten; XP/Level Logik kann später automatisiert wachsen |
+
+Beispiel POST Companion:
+```
+curl -X POST -H "X-API-Key: test" -H "Content-Type: application/json" \
+	-d '{"name":"Archivarin","archetype":"wissend","mood":"ruhig","stats":{"analyse":5}}' \
+	http://localhost:8000/story/meta/companions
+```
+
+Antwort (vereinfachtes Schema):
+```
+{
+	"id": 5,
+	"name": "Archivarin",
+	"archetype": "wissend",
+	"mood": "ruhig",
+	"stats": {"analyse":5},
+	"acquired_at": 1757772000.12
+}
+```
+
+UI-Hinweis: Aktuell werden Meta-Listen nur via `/story/state` geliefert (companions, buffs, skills Arrays). Eine direkte Darstellung im Inline-HTML folgt optional.
+
+### Aktueller Implementierungsstand (Story-Core)
+- Arc-Wechsel aktiv (level >=3 → exploration, level >=10 → mastery) erzeugt `arc_shift` Event.
+- Option TTL Mechanik vorhanden (Expiration Filter beim Laden – automatische Generierung bei Regeneration / Tick).
+- Meta CRUD Endpoints senden SSE Events (`story.meta.*`) + `story.state` Trigger für UI Refresh.
+- Tests decken State, Optionen, Actions, Arc-Shifts und Meta-CRUD (Seeds + Create) ab.
 
 
