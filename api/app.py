@@ -83,7 +83,31 @@ async def require_auth(x_api_key: str | None = Header(None, alias="X-API-Key")) 
         raise HTTPException(status_code=401, detail={"error": {"code": "invalid_api_key", "message": "X-API-Key invalid"}})
     return "default-agent"
 
-app = FastAPI(title="Life-Agent Dev Environment", version="0.1.0")
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def _lifespan(app_: FastAPI):  # pragma: no cover - setup wiring
+    # initialize DB + policies
+    try:
+        init_db()
+    except Exception:
+        pass
+    try:
+        load_policies()
+    except Exception:
+        pass
+    if os.getenv("THOUGHT_STREAM_ENABLE", "1") == "1":
+        try:
+            asyncio.create_task(_thought_loop())
+        except Exception:
+            logger.warning("failed to start thought loop")
+    try:
+        asyncio.create_task(_idle_background_loop())
+    except Exception:
+        logger.warning("failed to start idle background loop")
+    yield
+
+app = FastAPI(title="Life-Agent Dev Environment", version="0.1.0", lifespan=_lifespan)
 
 # Persona presets (added after refactor to ensure constant exists for chat)
 PERSONA_PRESETS: dict[str, str] = {
@@ -253,6 +277,17 @@ except NameError:
     from typing import Optional as _Opt
     db_conn: 'sqlite3.Connection | None' = None  # runtime assigned in init_db
 
+# Some test harnesses (httpx ASGITransport without lifespan) skip lifespan startup.
+# Provide a lightweight lazy initializer so endpoints can still function when
+# lifespan events did not run (e.g., direct import in tests).
+def _ensure_db() -> None:
+    global db_conn
+    if db_conn is None:
+        try:
+            init_db()
+        except Exception as e:  # pragma: no cover - defensive
+            raise RuntimeError(f"database_init_failed: {e}")
+
 REGISTRY = CollectorRegistry()
 ACTIONS_TOTAL = Counter("actions_total", "Count of observed actions", ["kind"], registry=REGISTRY)
 POLICY_DENIED_TOTAL = Counter("policy_denied_total", "Count of blocked plans/policies", ["reason"], registry=REGISTRY)
@@ -270,6 +305,13 @@ THOUGHT_CATEGORY_TOTAL = Counter("thought_category_total", "Thoughts per categor
 QUEST_COMPLETED_TOTAL = Counter("quest_completed_total", "Completed quests", registry=REGISTRY)
 STORY_EVENTS_TOTAL = Counter("story_events_total", "Story events count", ["kind"], registry=REGISTRY)
 STORY_OPTIONS_OPEN = Gauge("story_options_open", "Offene Story Optionen", registry=REGISTRY)
+
+# ---- Balance Parameter (env overrides) ----
+XP_BASE = float(os.getenv("STORY_XP_BASE", "80"))
+XP_EXP = float(os.getenv("STORY_XP_EXP", "1.4"))
+INSP_TICK_THRESHOLD = int(os.getenv("STORY_INSP_TICK_THRESHOLD", "120"))
+INSP_SOFT_CAP = int(os.getenv("STORY_INSP_SOFT_CAP", "150"))
+INSP_MIN_ENERGY = int(os.getenv("STORY_INSP_MIN_ENERGY", "10"))
 
 RISK_PATTERNS = [r"\b(os\.system|subprocess\.)", r"\.\./", r"/etc/passwd", r"\b(?:ssh|https?|ftp)://", r"(?i)api[_-]?key", r"(?i)\b(token|secret)\b"]
 
@@ -528,15 +570,18 @@ def _generate_story_options(state: StoryState) -> list[StoryOption]:
                 tags=["convert", "resource:wissen"],
             )
         )
-    if res.get("erfahrung", 0) >= (state.resources.get("level", 1) * 100):
-        xp_cost = state.resources.get("level", 1) * 100
+    # progressive XP curve (env driven)
+    _lvl = state.resources.get("level", 1)
+    xp_needed = int((_lvl ** XP_EXP) * XP_BASE)
+    if res.get("erfahrung", 0) >= xp_needed:
+        xp_cost = xp_needed
         opts.append(
             StoryOption(
                 id=f"opt_level_{int(_story_now())}",
                 label="Reflektion und Level-Aufstieg",
                 rationale="Erfahrungsschwelle erreicht",
                 risk=1,
-                expected={"erfahrung": -xp_cost, "level": +1, "stabilitaet": +5},
+                expected={"erfahrung": -xp_cost, "level": +1, "stabilitaet": +5, "inspiration": +3},
                 tags=["levelup"],
             )
         )
@@ -565,6 +610,18 @@ def _refresh_story_options(conn: sqlite3.Connection, state: StoryState) -> list[
     # clear existing (simple strategy MVP)
     conn.execute("DELETE FROM story_options")
     opts = _generate_story_options(state)
+    # Mentor (Gefährte) senkt Risiko aller Optionen leicht
+    try:
+        cur = conn.execute("SELECT name FROM story_companions")
+        names = {str(r[0]).lower() for r in cur.fetchall()}
+        if any(n.startswith("mentor") for n in names):
+            for o in opts:
+                if o.risk > 0:
+                    o.risk -= 1
+                if "mentor" not in o.tags:
+                    o.tags.append("mentor")
+    except Exception:
+        pass
     _persist_options(conn, opts)
     return opts
 
@@ -587,6 +644,10 @@ def _apply_story_option(conn: sqlite3.Connection, state: StoryState, option_id: 
     # apply delta
     new_resources = dict(state.resources)
     deltas: dict[str,int] = {}
+    # Mindest-Erfahrungsgewinn skaliert nach Risiko, falls Option keinen XP Effekt hat
+    if "erfahrung" not in expected:
+        base_xp = max(1, risk)
+        expected["erfahrung"] = base_xp
     for k, delta in expected.items():
         before = new_resources.get(k, 0)
         after = before + delta
@@ -616,6 +677,12 @@ def _story_tick(conn: sqlite3.Connection) -> StoryEvent:
     # passive drift
     resources = dict(state.resources)
     resources["energie"] = max(0, resources.get("energie",0) - 1)
+    # Passive Inspiration nur wenn unter Schwelle und genug Energie
+    if resources.get("inspiration",0) < INSP_TICK_THRESHOLD and resources.get("energie",0) > INSP_MIN_ENERGY:
+        resources["inspiration"] = resources.get("inspiration",0) + 1
+    # Soft Cap
+    if resources.get("inspiration",0) > INSP_SOFT_CAP:
+        resources["inspiration"] = INSP_SOFT_CAP
     epoch = state.epoch + 1
     mood = state.mood
     if resources.get("energie",0) < 30:
@@ -624,15 +691,21 @@ def _story_tick(conn: sqlite3.Connection) -> StoryEvent:
     conn.execute("UPDATE story_state SET ts=?, epoch=?, mood=?, arc=?, resources=? WHERE id=1", (_story_now(), epoch, mood, new_arc, json.dumps(resources)))
     ev_id = f"sev_{int(_story_now()*1000)}"
     text = "Zeit vergeht. Eine stille Verschiebung im inneren Raum."
+    deltas_tick = {"energie": -1}
+    if resources.get("inspiration",0) != state.resources.get("inspiration",0):
+        # inspiration actually increased
+        inc = resources.get("inspiration",0) - state.resources.get("inspiration",0)
+        if inc>0:
+            deltas_tick["inspiration"] = inc
     conn.execute(
         "INSERT INTO story_events(ts, epoch, kind, text, mood, deltas, tags, option_ref) VALUES (?,?,?,?,?,?,?,?)",
-        (_story_now(), epoch, "tick", text, mood, json.dumps({"energie": -1}), json.dumps(["tick"]), None),
+        (_story_now(), epoch, "tick", text, mood, json.dumps(deltas_tick), json.dumps(["tick"]), None),
     )
     _core_maybe_arc_shift(conn, state.arc, new_arc, epoch, mood)
     # regenerate options occasionally
     _refresh_story_options(conn, StoryState(epoch=epoch, mood=mood, arc=state.arc, resources=resources, options=[]))
     conn.commit()
-    return StoryEvent(id=ev_id, ts=_story_now(), epoch=epoch, kind="tick", text=text, mood=mood, deltas={"energie": -1}, tags=["tick"], option_ref=None)
+    return StoryEvent(id=ev_id, ts=_story_now(), epoch=epoch, kind="tick", text=text, mood=mood, deltas=deltas_tick, tags=["tick"], option_ref=None)
 
 # ---------------- Story LLM Support -----------------
 async def _story_llm_generate(prompt: str, max_tokens: int = 120) -> str:
@@ -671,8 +744,49 @@ def _record_story_event(ev: StoryEvent) -> None:  # type: ignore[override]
 @app.get("/story/state", response_model=StoryState)
 async def story_get_state(agent: str = Depends(require_auth)) -> StoryState:  # type: ignore[override]
     rate_limit(agent)
+    _ensure_db()
+    # Aufräumen abgelaufener Buffs vor Zustandsabruf
+    try:
+        now = _story_now()
+        db_conn.execute("DELETE FROM story_buffs WHERE expires_at IS NOT NULL AND expires_at < ?", (now,))  # type: ignore[arg-type]
+        db_conn.commit()
+    except Exception:
+        pass
     st = _get_story_state(db_conn)  # type: ignore[arg-type]
     return st
+
+@app.get("/story/export")
+async def story_export(limit: int = 100, agent: str = Depends(require_auth)) -> dict[str, Any]:  # type: ignore[override]
+    rate_limit(agent)
+    _ensure_db()
+    st = _get_story_state(db_conn)  # type: ignore[arg-type]
+    cur = db_conn.execute("SELECT id, ts, epoch, kind, text, mood, deltas, tags, option_ref FROM story_events ORDER BY id DESC LIMIT ?", (limit,))  # type: ignore[arg-type]
+    evs: list[dict[str, Any]] = []
+    for row in cur.fetchall():
+        rid, ts, epoch, kind, text, mood, deltas_json, tags_json, option_ref = row
+        try: deltas = json.loads(deltas_json) if deltas_json else None
+        except Exception: deltas = None
+        try: tags = json.loads(tags_json) if tags_json else []
+        except Exception: tags = []
+        evs.append({"id": rid, "ts": ts, "epoch": epoch, "kind": kind, "text": text, "mood": mood, "deltas": deltas, "tags": tags, "option_ref": option_ref})
+    return {"state": st.model_dump(), "events": list(reversed(evs)), "exported_at": time.time()}
+
+@app.post("/story/reset")
+async def story_reset(agent: str = Depends(require_auth)) -> dict[str, Any]:  # type: ignore[override]
+    rate_limit(agent)
+    _ensure_db()
+    base_resources = {"energie": 80, "inspiration": 20, "wissen": 0, "erfahrung": 0, "stabilitaet": 50, "level": 1}
+    db_conn.execute("UPDATE story_state SET ts=?, epoch=?, mood=?, arc=?, resources=? WHERE id=1", (_story_now(), 0, "neutral", "beginn", json.dumps(base_resources)))  # type: ignore[arg-type]
+    try:
+        db_conn.execute("DELETE FROM story_events")
+        db_conn.execute("DELETE FROM story_options")
+    except Exception:
+        pass
+    st = _get_story_state(db_conn)  # type: ignore[arg-type]
+    _refresh_story_options(db_conn, st)
+    db_conn.commit()
+    await emit_event("story.reset", {})
+    return {"status": "reset", "state": st.model_dump()}
 
 @app.get("/story/log", response_model=list[StoryEvent])
 async def story_log(limit: int = 50, agent: str = Depends(require_auth)) -> list[StoryEvent]:  # type: ignore[override]
@@ -1017,20 +1131,7 @@ def load_policies() -> None:
     policies['loaded_at'] = time.time()
 
 # update startup to load policies
-@app.on_event("startup")
-async def on_startup() -> None:  # pragma: no cover - simple init
-    init_db()
-    load_policies()
-    logger.info("startup complete policies=%d", len(policies.get('rules', [])))
-    if os.getenv("THOUGHT_STREAM_ENABLE", "1") == "1":
-        try:
-            asyncio.create_task(_thought_loop())
-        except Exception:
-            logger.warning("failed to start thought loop")
-    try:
-        asyncio.create_task(_idle_background_loop())
-    except Exception:
-        logger.warning("failed to start idle background loop")
+## (startup handler removed in favor of lifespan context)
 
 # ---------------- Security ------------------
 API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -1180,21 +1281,27 @@ async def healthz() -> dict[str, str]:
 @app.get("/events")
 async def events_stream(request: Request, agent: str = Depends(require_auth)) -> StreamingResponse:
     rate_limit(agent)
+    heartbeat_interval = float(os.getenv("SSE_HEARTBEAT_INTERVAL", "15"))
+    poll_timeout = float(os.getenv("SSE_POLL_TIMEOUT", "1"))
     async def event_gen() -> AsyncGenerator[bytes, None]:
+        # Initial directives + ready event for clients/tests
         yield b"retry: 5000\n"
         yield b"event: ready\ndata: {}\n\n"
+        # Test shortcut: allow immediate termination (no infinite stream) using ?test=1
+        if request.query_params.get("test") == "1" or os.getenv("SSE_TEST_MODE") == "1":
+            return
         last_keepalive = time.time()
         while True:
             if await request.is_disconnected():
                 break
             now = time.time()
             try:
-                evt = await asyncio.wait_for(_get_event_queue().get(), timeout=1.0)
+                evt = await asyncio.wait_for(_get_event_queue().get(), timeout=poll_timeout)
                 payload = f"event: {evt['kind']}\ndata: {json.dumps(evt)}\n\n".encode()
                 yield payload
             except asyncio.TimeoutError:
                 pass
-            if now - last_keepalive >= 15:
+            if now - last_keepalive >= heartbeat_interval:
                 yield b":keepalive\n\n"
                 last_keepalive = now
     return StreamingResponse(event_gen(), media_type="text/event-stream")
@@ -1216,7 +1323,16 @@ h2{margin:4px 0 12px;font-size:18px}
 button{background:#2563eb;color:#fff;border:0;padding:6px 12px;margin:4px 4px 4px 0;border-radius:4px;cursor:pointer;font-size:13px}
 button.secondary{background:#374151}
 code{font-size:12px;background:#111722;padding:2px 4px;border-radius:4px}
-.opts button{display:block;width:100%;text-align:left}
+.opts button{display:block;width:100%;text-align:left;position:relative}
+.opts button.levelup{border:1px solid #f59e0b;background:#92400e}
+.opts button .risk{position:absolute;right:6px;top:6px;font-size:10px;padding:2px 5px;border-radius:10px;background:#374151;color:#fff;opacity:.85}
+.opts button .risk.r0{background:#059669}
+.opts button .risk.r1{background:#2563eb}
+.opts button .risk.r2{background:#d97706}
+.opts button .risk.r3{background:#dc2626}
+.badge{display:inline-block;margin-left:6px;padding:1px 4px;font-size:10px;border-radius:4px;background:#1f2937;color:#fff}
+.badge.level{background:#f59e0b;color:#000}
+.badge.insp{background:#ec4899}
 .log-item{margin:0 0 4px;line-height:1.25}
 .kind-action{color:#10b981}.kind-tick{color:#9ca3af}.kind-arc_shift{color:#f59e0b}
 .flex{display:flex;gap:16px;flex-wrap:wrap}
@@ -1268,9 +1384,9 @@ function fmtResBlocks(r){const maxMap={energie:100,wissen:200,inspiration:100,ru
 function renderCompanions(list){const box=document.getElementById('companionsBox'); if(!list||!list.length){box.textContent='(keine)';return;} box.innerHTML=list.map(c=>`<div><b>${c.name}</b> <small>${c.archetype||''}</small> – ${c.mood||''} ${c.stats?'<code>'+Object.entries(c.stats).map(([k,v])=>k+':'+v).join(', ')+'</code>':''}</div>`).join('')}
 function renderBuffs(list){const now=Date.now()/1000;const box=document.getElementById('buffsBox'); if(!list||!list.length){box.textContent='(keine)';return;} box.innerHTML=list.map(b=>{const rem=b.expires_at?Math.max(0,Math.round(b.expires_at-now)):null; return `<div><b>${b.label}</b> <small>${b.kind||''}</small> ${b.magnitude!=null?('['+b.magnitude+']'):''} ${rem!=null?(' <span style=color:#f59e0b>'+rem+'s</span>'):''}</div>`}).join('')}
 function renderSkills(list){const box=document.getElementById('skillsBox'); if(!list||!list.length){box.textContent='(keine)';return;} box.innerHTML=list.map(s=>`<div><b>${s.name}</b> Lv ${s.level} <small>${s.category||''}</small> <span style='opacity:.6'>xp:${s.xp}</span></div>`).join('')}
-function loadState(){fetchJSON('/story/state').then(st=>{j('stateBox',`Arc: <b>${st.arc}</b><br>Mood: ${st.mood}<br>Epoch: ${st.epoch}<br>${fmtResBlocks(st.resources)}`);renderCompanions(st.companions);renderBuffs(st.buffs);renderSkills(st.skills);renderOpts(st.options)}).catch(e=>console.error(e))}
-function renderOpts(opts){const box=document.getElementById('optsBox');box.innerHTML=''; if(!opts.length){box.textContent='(keine)';return} opts.forEach(o=>{const b=document.createElement('button'); b.textContent=`${o.label}`; b.onclick=()=>act(o.id); box.appendChild(b)})}
-function loadLog(){fetchJSON('/story/log?limit=80').then(events=>{const box=document.getElementById('logBox'); box.innerHTML=events.map(e=>`<div class='log-item kind-${e.kind}'>[${e.epoch}] <span>${e.kind}</span>: ${e.text}</div>`).join('')}).catch(e=>{})}
+function loadState(){fetchJSON('/story/state').then(st=>{const energy=st.resources.energie||0; const energyWarn = energy<30?"<div style='color:#f59e0b;font-size:11px;margin-top:6px'>Niedrige Energie</div>":""; const arcColor = st.arc.includes('krise')?'#dc2626':(st.arc.includes('aufbau')?'#2563eb':(st.arc.includes('ruhe')?'#10b981':'#6b7280')); const arcBadge = `<span style='background:${arcColor};padding:2px 8px;border-radius:12px;font-size:11px;margin-left:8px'>${st.arc}</span>`; j('stateBox',`Arc: <b>${st.arc}</b>${arcBadge}<br>Mood: ${st.mood}<br>Epoch: ${st.epoch}<br>${fmtResBlocks(st.resources)}${energyWarn}`);renderCompanions(st.companions);renderBuffs(st.buffs);renderSkills(st.skills);renderOpts(st.options)}).catch(e=>console.error(e))}
+function renderOpts(opts){const box=document.getElementById('optsBox');box.innerHTML=''; if(!opts.length){box.textContent='(keine)';return} opts.forEach(o=>{const b=document.createElement('button'); b.textContent=`${o.label}`; if((o.tags||[]).includes('levelup')){b.classList.add('levelup')} const riskSpan=document.createElement('span'); riskSpan.className='risk r'+(o.risk||0); riskSpan.textContent='R'+(o.risk||0); b.appendChild(riskSpan); b.onclick=()=>act(o.id); box.appendChild(b)})}
+function loadLog(){fetchJSON('/story/log?limit=80').then(events=>{const box=document.getElementById('logBox'); box.innerHTML=events.map(e=>{let badges=''; if(e.deltas){ if(e.deltas.level>0){badges+=`<span class='badge level'>Level +${e.deltas.level}</span>`;} if(e.deltas.inspiration && e.deltas.inspiration>5){badges+=`<span class='badge insp'>+${e.deltas.inspiration} Insp</span>`;} } return `<div class='log-item kind-${e.kind}'>[${e.epoch}] <span>${e.kind}</span>: ${e.text} ${badges}</div>`}).join('')}).catch(e=>{})}
 function act(id){fetchJSON('/story/action',{method:'POST',body:JSON.stringify({option_id:id})}).then(e=>{loadState();prependLog(e)})}
 function free(){const t=document.getElementById('freeText').value.trim(); if(!t) return; fetchJSON('/story/action',{method:'POST',body:JSON.stringify({free_text:t})}).then(e=>{document.getElementById('freeText').value=''; loadState(); prependLog(e)})}
 function advance(){fetchJSON('/story/advance',{method:'POST'}).then(e=>{loadState();prependLog(e)})}
@@ -1685,6 +1801,9 @@ async def _idle_background_loop():
                     idle_state["tick"] += 1
                     idle_state["resources"] += 1
                     await emit_event("idle.tick.auto", {"tick": idle_state["tick"], "resources": idle_state["resources"], "auto": True})
+                    # alle 2 Auto-Ticks eine sanfte Hinweis-Empfehlung
+                    if idle_state["tick"] % 2 == 0:
+                        await emit_event("idle.suggest", {"tip": "Optionen erneuern oder Plan prüfen?"})
                 except Exception:
                     pass
             await asyncio.sleep(IDLE_BACKGROUND_INTERVAL)
