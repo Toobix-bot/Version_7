@@ -122,6 +122,58 @@ Artefakt-Verzeichnisse:
 - Lange Tokens werden via CSS (wrap/break) gekappt (geplant: separate Utility-Klasse – TODO).
 - Lokaler Storage nur für API Key – kein Persist persönlicher Daten.
 
+## Addendum – Schneller Überblick (4 Schritte)
+1. API-Key eingeben (oben rechts) → Badge wird grün.
+2. Policy laden & Validate (Dry-Run) → Status-Badge „policy: valid“.
+3. Plan anlegen (Intent + Zielpfade) → Varianten erscheinen + Slider nutzen.
+4. Variante prüfen → optional „PR aus Plan“ (Dry-Run zuerst) → Branch / (PR URL) im Output.
+
+### PlanResponse Beispiel
+```json
+{
+	"status": "created",
+	"artifact": "plans/plan_1736531111.json",
+	"variants": [
+		{"id":"v-safe","label":"vorsichtig","risk_level":"low","knobs":{"depth_limit":2,"risk_budget":"low"},"summary":"Minimaler Scope","patch_preview":"diff --git ..."},
+		{"id":"v-balanced","label":"ausgewogen","risk_level":"medium","knobs":{"depth_limit":3,"risk_budget":"medium"},"summary":"Ausbalanciert"},
+		{"id":"v-bold","label":"mutig","risk_level":"high","knobs":{"depth_limit":5,"risk_budget":"high"},"summary":"Aggressive Erweiterung"}
+	]
+}
+```
+
+### PR aus Plan (Request)
+```json
+{
+	"intent": "demo feature",
+	"variant_id": "v-safe",
+	"dry_run": true
+}
+```
+Antwort (Dry-Run): `{ "status": "dry-run", "branch": "plan/demo-feature-20250110-101500" }`
+
+### Architekturfluss
+Intent → Plan (Varianten) → Auswahl (Slider) → Optionaler Review & Patch-Vorschau → PR Erstellung → Review → Merge.
+
+### Variante wählen (UI)
+- Slider löst internes Event `variant.selected` aus (lokale Badge Aktualisierung)
+- Buttons der Liste bleiben für direkten Vergleich nutzbar.
+
+### Tipps für Einsteiger
+- Erst Dry-Run (Policy, PR) nutzen.
+- Events-Tab früh öffnen: `plan.created`, `idle.tick.auto` zeigen Aktivität.
+- `metrics` im UI nur gekürzt – vollständige Ausgabe direkt via GET /metrics.
+
+### Smoke Tests (Empfohlen minimal)
+| Ziel | Route | Erwartung |
+|------|-------|-----------|
+| Auth Gate | POST /plan ohne Key | 401/403 |
+| Plan Flow | POST /plan mit Key | 200 + variants[] |
+| OpenAPI | GET /openapi.json | securitySchemes vorhanden |
+| SSE | GET /events | event: ready + Heartbeats |
+| Metrics | GET /metrics | Prometheus Text (# HELP) |
+
+Diese Tabelle dient als Referenz für CI-Fehlschläge.
+
 ## Offene Vorhaben / Roadmap (Kurz)
 - PR-Erstellung aus Plan (Branch, Commit, GitHub API Integration)
 - Side-by-Side Diff + Inline Kommentaranker

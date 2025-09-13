@@ -1,6 +1,9 @@
 Param(
-  [string]$Pattern = "tests/test_story.py",
-  [switch]$Quiet
+  [string]$Pattern,
+  [switch]$Quiet,
+  [switch]$All,
+  [switch]$Smoke,
+  [switch]$Coverage
 )
 
 $ErrorActionPreference = 'Stop'
@@ -18,11 +21,18 @@ if (-not (Test-Path $pytest)) {
   pip install pytest -q
 }
 
-$env:PYTEST_CURRENT_TEST = '1'
 if (-not $env:API_TOKENS) { $env:API_TOKENS = 'test' }
 
-$argsList = @($Pattern)
+# Determine target set
+$target = ''
+if ($All) { $target = 'tests' }
+elseif ($Smoke) { $target = 'tests/test_smoke_sync.py' }
+elseif ($Pattern) { $target = $Pattern }
+else { $target = 'tests' }
+
+$argsList = @($target)
 if ($Quiet) { $argsList += '-q' }
+if ($Coverage) { $argsList = @('--maxfail','1','--disable-warnings','--cov=api','--cov-report=term-missing') + $argsList }
 
 Write-Host "Running: $pytest $($argsList -join ' ')" -ForegroundColor Cyan
 & $pytest @argsList
