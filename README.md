@@ -7,7 +7,7 @@ Self-Observing Life-Agent Development Environment (MVP).
 ## Kurz erklärt
 Ein kleiner Server mit UI, der Pläne baut, sich selbst beobachtet und sich per Regeln steuern lässt. In der Web-UI siehst du Meta/LLM-Infos, eine Plan-Demo, einen LLM-Chat (sparsam) sowie Live-Bereiche für Events & Metrics.
 
-Neu: Tab-basierte deutsche UI, Impact-Score für Vorschläge, Multi-Agent Memory (`agent_id`), Quest-Fortschritt, kategorisierte Gedanken (risk/opportunity/action/system/neutral), verbesserter Diff-Viewer (Zeilennummern, Suche, Hunk-Navigation) und automatische statische Verbesserungsvorschläge (`/suggest/auto`).
+Neu: Tab-basierte deutsche UI, Impact-Score für Vorschläge, Multi-Agent Memory (`agent_id`), Quest-Fortschritt, kategorisierte Gedanken (risk/opportunity/action/system/neutral), verbesserter Diff-Viewer (Zeilennummern, Suche, Hunk-Navigation), automatische statische Verbesserungsvorschläge (`/suggest/auto`), Onboarding-Panel ("Erste Schritte"), Endpoint & Script für PR aus Plan (`POST /dev/pr-from-plan`, `scripts/new_pr_from_plan.ps1`), Idle Auto-Ticks bei Inaktivität (`idle.tick.auto` Events) sowie Policy Dry-Run Shortcut (`/policy/dry-run`).
 
 Wichtiges auf einen Blick:
 - OpenAPI-Doku: `/docs` (Header `X-API-Key` erforderlich)
@@ -55,7 +55,7 @@ Nächste mögliche Erweiterungen:
 - Policy validieren ohne Persistenz: Inhalt editieren → „Validate“ (dry_run) – bei Erfolg „Apply“.
 - Offene Vorschläge reduzieren: Liste refresh → Relevante prüfen → Approve oder Revise. Gauge `suggestions_open_total` sinkt bei Approval.
 - Export statische OpenAPI: `python ops/export_openapi.py` (optional `PUBLIC_SERVER_URL` setzen).
-- PR aus Plan (geplant): Branch & PR via künftigen Endpoint / Script (noch nicht implementiert – siehe Roadmap „Offene Vorhaben“).
+- PR aus Plan: Button im Plan-Panel ("PR aus Plan") oder Script `scripts/new_pr_from_plan.ps1` (nutzt `/dev/pr-from-plan` Dry-Run oder tatsächlichen Branch + optional GitHub PR falls `gh` CLI verfügbar).
 
 ## Reference (Auswahl)
 Sicherheitsrelevante Header:
@@ -71,7 +71,9 @@ Wichtige Endpoints (GET/POST):
 - `/memory/list?agent_id=` (gefilterte Memory-Einträge pro Agent)
 - `/thought/stream` (kategorisierter Gedankenverlauf)
 - `/env/info`
-- Plugin: `/game/idle/state`, `/game/idle/tick`
+- Plugin: `/game/idle/state`, `/game/idle/tick` + Hintergrund Auto-Ticks (`idle.tick.auto`)
+- Plan → PR: `/dev/pr-from-plan` (POST)
+- Policy schnelles Validieren: `/policy/dry-run`
 - Story Meta: `/story/meta/companions`, `/story/meta/buffs`, `/story/meta/skills` (GET & POST)
 
 Kern-Metriken:
@@ -108,7 +110,9 @@ Artefakt-Verzeichnisse:
 - Quests (Tags `quest:*` + Status /quest/list + Event `quest.completed` + Metrik `quest_completed_total`)
 - Impact Scoring bei Approval, abrufbar `/suggest/impact?id=`
 - Policy Editor (Load, Validate, Apply) mit Inline-Fehlern
-- Idle Game Plugin (State + Tick + Events) als Extensibility-Beispiel
+- Idle Game Plugin (State + Tick + Events + Auto-Ticks bei Inaktivität)
+- Plan → PR Workflow (Endpoint + PowerShell Script)
+- Policy Dry-Run Endpoint
 - Observability: Prometheus + strukturierte JSON Logs + SSE Stream
 - Exportierbare OpenAPI (statisch + live) mit Security Schemes & Servers
 - UI Tabs (Deutsch) + verbesserter Diff Viewer (Zeilen, Farben, Navigation, Regex Suche)

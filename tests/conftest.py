@@ -9,6 +9,7 @@ if str(ROOT) not in sys.path:
 
 import httpx  # noqa: E402
 import pytest  # noqa: E402
+import pytest_asyncio  # noqa: E402
 from api.app import app  # noqa: E402
 
 os.environ.setdefault("API_TOKENS", "test-token")
@@ -17,8 +18,8 @@ os.environ.setdefault("API_TOKENS", "test-token")
 def anyio_backend():
     return "asyncio"
 
-@pytest.fixture
-async def client():
+@pytest_asyncio.fixture
+async def client():  # async test client fixture
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac

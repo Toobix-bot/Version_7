@@ -6,6 +6,9 @@
 	<meta name="viewport" content="width=device-width,initial-scale=1" />
 	<style>
 		body{font-family:system-ui,Arial,sans-serif;margin:0;background:#0f1115;color:#eee;}
+		main{max-width:1400px;margin:0 auto;}
+		p,li{overflow-wrap:anywhere;}
+		pre{white-space:pre-wrap;word-break:break-word;}
 		header{padding:12px 20px;background:#1b1f27;display:flex;align-items:center;gap:16px;}
 		h1{font-size:18px;margin:0;}
 		#tabsBar{display:flex;gap:4px;flex-wrap:wrap;padding:8px 14px;background:#14181f;border-bottom:1px solid #252b33;}
@@ -49,13 +52,16 @@
 		.diff-line .ln{display:inline-block;width:70px;opacity:.55;color:#94a3b8;}
 		.diff-line.highlight{outline:1px solid #facc15;background:linear-gradient(90deg,#423511,#3a2f13);}
 		#suggestPatchOut{background:transparent;border:0;padding:0;}
+		#errorSummary{display:none;background:#3a1214;border:1px solid #803036;color:#fca5a5;padding:8px;border-radius:6px;font-size:12px;line-height:1.35;}
+		.errorField{border-color:#f87171 !important;background:#2b1113 !important;}
+		.microcopy{font-size:11px;opacity:.65;margin-top:2px;}
 	</style>
 </head>
 <body>
 	<header>
 		<h1>Life-Agent Dashboard</h1>
 		<div class="row" style="margin-left:auto;">
-			<input id="apiKey" placeholder="API Key" value="test" style="width:160px;" />
+			<input id="apiKey" placeholder="API Key" value="test" style="width:160px;" title="Wird lokal im Browser gespeichert (localStorage)." />
 			<span id="apiKeyStatus" class="pill">key?</span>
 			<span id="badgeMeta" class="pill">meta: -</span>
 			<span id="badgeLLM" class="pill">llm: -</span>
@@ -68,9 +74,28 @@
 	</header>
 	<div id="tabsBar"></div>
 	<main>
+		<div id="errorSummary" aria-live="polite"></div>
 		<div id="tab-uebersicht" class="tabSection active">
 			<section class="panel">
 			<h2>Übersicht</h2>
+			<div id="onboarding" style="background:#13202c;border:1px solid #27323d;padding:10px;border-radius:6px;line-height:1.4;font-size:12px;display:flex;flex-direction:column;gap:6px;">
+				<strong>Erste Schritte</strong>
+				<ol style="margin:0 0 0 18px;padding:0;display:flex;flex-direction:column;gap:4px;">
+					<li>API Key oben setzen (persistiert lokal).</li>
+					<li>LLM Status prüfen &gt; Falls OFF: <code>GROQ_API_KEY</code> setzen und Server neu starten.</li>
+					<li>Plane Änderung: Intent + Pfade eingeben &rarr; "Plan erstellen".</li>
+					<li>Variante auswählen, Details prüfen (Patch Vorschau).</li>
+					<li>Suggestion Workflow: Tab "Vorschläge" nutzen (Generieren, Genehmigen, Verfeinern).</li>
+					<li>Story erleben: Tab "Spiel" oder separate <a href="/story/ui" target="_blank">Story UI</a>.</li>
+					<li>Richtlinie anpassen: Tab "Richtlinien" &rarr; Laden, Bearbeiten, Validieren, Anwenden.</li>
+					<li>Beobachte Metriken & Events für Telemetrie.</li>
+				</ol>
+				<div style="display:flex;gap:8px;flex-wrap:wrap;">
+					<span class="pill" style="background:#203042;">Onboarding</span>
+					<span class="pill" style="background:#203422;">Flow</span>
+					<span class="pill" style="background:#342022;">LLM</span>
+				</div>
+			</div>
 			<div class="row">
 				<span class="pill" id="metaVersion">ver...</span>
 				<span class="pill" id="metaUptime">uptime...</span>
@@ -84,8 +109,10 @@
 			<section class="panel">
 			<h2>Plan</h2>
 			<input id="planIntent" placeholder="Intent / Ziel" value="demo" />
+			<div class="microcopy" id="planIntentHelp">Kurz und prägnant formulieren (z.B. "Logging verbessern" oder "Neuen Endpunkt für /health hinzufügen").</div>
 			<textarea id="planContext" placeholder="Kontext">kurzer test</textarea>
 			<input id="planTargets" placeholder="Dateipfade (Komma)" value="api/app.py" />
+			<div class="microcopy" id="planTargetsHelp">Kommagetrennte relative Pfade (Whitelist enforced). Beispiel: <code>api/app.py,policy/model.py</code></div>
 			<div class="row">
 				<select id="riskBudget" style="flex:1;min-width:120px;">
 					<option value="">Risiko (auto)</option>
@@ -94,6 +121,25 @@
 					<option value="high">Hoch</option>
 				</select>
 				<button id="btnPlan">Plan erstellen</button>
+				<button id="btnPlanPR" class="secondary">PR aus Plan</button>
+			</div>
+			<div id="variantSliderWrap" style="display:none;flex-direction:column;gap:4px;margin:6px 0;">
+				<label style="font-size:11px;display:flex;justify-content:space-between;align-items:center;">Variante wählen
+					<span id="variantSliderLabel" class="pill">-</span></label>
+				<input type="range" id="variantSlider" min="0" max="0" value="0" step="1" />
+			</div>
+			<div id="prModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);align-items:center;justify-content:center;z-index:500;">
+				<div style="background:#1d222b;padding:16px;border:1px solid #2b313c;border-radius:8px;width:360px;display:flex;flex-direction:column;gap:8px;">
+					<h3 style="margin:0;font-size:15px;">PR aus Plan</h3>
+					<input id="prBranch" placeholder="Branch (auto)" />
+					<input id="prVariant" placeholder="Variant ID (leer = erste)" />
+					<label style="font-size:11px;display:flex;align-items:center;gap:6px;"><input type="checkbox" id="prDry" /> Dry Run</label>
+					<div class="row" style="justify-content:flex-end;">
+						<button id="prCancel" class="secondary">Abbrechen</button>
+						<button id="prRun">Ausführen</button>
+					</div>
+					<pre id="prOut" style="max-height:140px;overflow:auto;">PR Output...</pre>
+				</div>
 			</div>
 			<div id="variantList" style="display:flex;flex-direction:column;gap:6px;max-height:140px;overflow:auto;border:1px solid #2b313c;padding:6px;border-radius:6px;background:#151a20;">
 				<em style="font-size:12px;color:#667">Noch keine Varianten geladen.</em>
@@ -144,6 +190,7 @@
 				<span id="policyStatus" class="pill">policy: ?</span>
 			</div>
 			<textarea id="policyContent" placeholder="YAML policy..." spellcheck="false"></textarea>
+			<div class="microcopy">Nutze "Prüfen" für schnellen Dry-Run (<code>/policy/dry-run</code>). Erst bei Erfolg "Anwenden".</div>
 			<pre id="policyOut">Policy Output...</pre>
 			</section>
 		</div>
@@ -226,7 +273,7 @@
 		</div>
 	</main>
 	<footer>
-		&copy; Life-Agent Dev • <a href="/docs" target="_blank">OpenAPI Docs</a>
+		&copy; Life-Agent Dev • <a href="/docs" target="_blank">OpenAPI Docs</a> • <a href="/static-docs/openapi.yaml" target="_blank">Spec (YAML)</a>
 	</footer>
 	<script src="https://cdn.jsdelivr.net/npm/js-yaml@4.1.0/dist/js-yaml.min.js"></script>
 	<script>
@@ -283,6 +330,43 @@
 		function setText(id,content){const el=$(id); if(el) el.textContent=content;}
 		function setBadge(el, ok){ if(!el) return; el.style.background = ok? '#1f3b2b':'#402727'; el.style.color = ok? '#6ee7b7':'#fca5a5'; }
 
+		// Local metrics (client only) helper
+		function emitLocalMetric(kind,payload){
+			console.log('[metric]',kind,payload);
+			if(kind==='variant.selected'){
+				let badge=document.getElementById('variantMetricBadge');
+				if(!badge){
+					badge=document.createElement('span');
+					badge.id='variantMetricBadge';
+					badge.className='pill';
+					const headerRow=document.querySelector('header .row');
+					if(headerRow){ headerRow.appendChild(badge); }
+				}
+				badge.textContent='variant: '+payload.label;
+				badge.style.background='#203042';
+			}
+		}
+
+		// ---- Error Handling Helpers ----
+		const _errors=[];
+		function clearErrors(){
+			_errors.length=0;
+			const sum=$('#errorSummary');
+			if(sum){ sum.style.display='none'; sum.innerHTML=''; }
+			document.querySelectorAll('.errorField').forEach(el=>{el.classList.remove('errorField'); el.removeAttribute('aria-invalid');});
+		}
+		function addError(fieldId,message){
+			_errors.push({field:fieldId,message});
+			const el=document.getElementById(fieldId);
+			if(el){ el.classList.add('errorField'); el.setAttribute('aria-invalid','true'); }
+		}
+		function renderErrors(){
+			if(!_errors.length) return;
+			const sum=$('#errorSummary'); if(!sum) return;
+			sum.innerHTML='<strong>Fehler ('+_errors.length+')</strong><ul style="margin:4px 0 0 16px;padding:0;">'+_errors.map(e=>'<li><a style="color:#fca5a5;" href="#'+e.field+'">'+e.message+'</a></li>').join('')+'</ul>';
+			sum.style.display='block';
+		}
+
 		async function loadMeta(){
 			const meta = await api('/meta');
 			setText('#metaOut', fmt(meta));
@@ -306,6 +390,12 @@
 				box.innerHTML='<em style="font-size:12px;color:#667">Keine Varianten.</em>';
 				return;
 			}
+			// attach to slider
+			const sliderWrap=$('#variantSliderWrap'); const slider=$('#variantSlider'); const lab=$('#variantSliderLabel');
+			if(slider){ slider.max=String(r.variants.length-1); slider.value='0'; sliderWrap.style.display='flex'; }
+			function applyVariant(ix){
+				const v=r.variants[ix]; if(!v) return; lab.textContent=v.label; setText('#planVariantDetail', fmt({id:v.id,label:v.label,risk_level:v.risk_level,knobs:v.knobs,summary:v.summary,explanation:v.explanation,patch_preview:v.patch_preview})); $('#prVariant').value=v.id; emitLocalMetric('variant.selected',{id:v.id,label:v.label,risk:v.risk_level}); }
+			if(slider){ slider.oninput=()=>applyVariant(parseInt(slider.value)); }
 			r.variants.forEach(v=>{
 				const btn=document.createElement('button');
 				btn.className='secondary';
@@ -324,13 +414,34 @@
 						patch_preview:v.patch_preview
 					};
 					setText('#planVariantDetail', fmt(detail));
+					$('#prVariant').value = v.id;
 				};
 				box.appendChild(btn);
 			});
+			applyVariant(0);
 		}
+		// PR Modal logic
+		$('#btnPlanPR').onclick=()=>{ $('#prModal').style.display='flex'; };
+		$('#prCancel').onclick=()=>{ $('#prModal').style.display='none'; };
+		$('#prRun').onclick=async()=>{
+			const intent=$('#planIntent').value.trim(); if(!intent){ alert('Intent erforderlich'); return; }
+			const variantId=$('#prVariant').value.trim();
+			const branch=$('#prBranch').value.trim();
+			const dry=$('#prDry').checked;
+			const body={intent, variant_id: variantId||undefined, branch: branch||undefined, dry_run: dry};
+			const r=await api('/dev/pr-from-plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+			setText('#prOut', fmt(r));
+			if(r.status==='created' || r.status==='dry-run'){ $('#prModal').style.display='none'; }
+		};
 		async function runPlan(){
+			clearErrors();
+			const intentRaw=$('#planIntent').value.trim();
+			if(!intentRaw){ addError('planIntent','Intent erforderlich'); }
+			const targetsRaw=$('#planTargets').value.trim();
+			if(!targetsRaw){ addError('planTargets','Mindestens ein Dateipfad erforderlich'); }
+			if(_errors.length){ renderErrors(); return; }
 			const body = {
-				intent: $('#planIntent').value.trim(),
+				intent: intentRaw,
 				context: $('#planContext').value,
 				target_paths: $('#planTargets').value.split(',').map(s=>s.trim()).filter(Boolean)
 			};
@@ -360,6 +471,7 @@
 				pre.textContent += '\n'+e.data; pre.scrollTop=pre.scrollHeight; 
 				if(e.data.includes('suggest.open')){ const m=e.data.match(/"open":\s*(\d+)/); if(m) updateOpenBadge(parseInt(m[1])); }
 				if(e.data.includes('thought.stream')){ refreshThoughts(); }
+				if(e.data.includes('idle.tick.auto')){ try{ const m=e.data.match(/"tick":\s*(\d+)/); if(m){ $('#idleInfo').textContent='auto tick: '+m[1]; } }catch{} }
 			};
 			evtSrc.onerror=()=>$('#eventsState').textContent='events: error';
 		}
@@ -420,7 +532,24 @@
 		async function runIdleTick(){ const r=await api('/game/idle/tick',{method:'POST'}); setText('#idleOut', fmt(r)); if(r.state){$('#idleInfo').textContent='tick: '+r.state.tick+' res:'+r.state.resources;} }
 		// Policy
 		async function loadPolicy(){ const r=await api('/policy/current'); setText('#policyOut', fmt(r)); if(r.policy){ $('#policyContent').value = jsyaml.dump(r.policy); $('#policyStatus').textContent='policy: loaded'; setText('#badgePolicy','policy: loaded'); setBadge($('#badgePolicy'), true);} else { setText('#badgePolicy','policy: none'); setBadge($('#badgePolicy'), false);} }
-		async function validatePolicy(){ const content=$('#policyContent').value; const body={content, dry_run:true}; const r=await api('/policy/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); setText('#policyOut', fmt(r)); $('#policyStatus').textContent = r.status==='validated'? 'policy: valid':'policy: ?'; if(r.status==='validated'){ setText('#badgePolicy','policy: valid'); setBadge($('#badgePolicy'), true);} else { setBadge($('#badgePolicy'), false);} }
+		async function validatePolicy(){
+			clearErrors();
+			const content=$('#policyContent').value;
+			if(!content.trim()){ addError('policyContent','Policy Inhalt leer'); renderErrors(); return; }
+			const body={content};
+			const r=await api('/policy/dry-run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+			setText('#policyOut', fmt(r));
+			if(r.status==='ok'){
+				$('#policyStatus').textContent='policy: valid'; setText('#badgePolicy','policy: valid'); setBadge($('#badgePolicy'), true);
+			} else if(r.status==='error'){
+				addError('policyContent','YAML Fehler: '+r.message); setBadge($('#badgePolicy'), false); $('#policyStatus').textContent='policy: yaml?';
+			} else if(r.status==='invalid'){
+				addError('policyContent','Validierungsfehler: '+r.message); setBadge($('#badgePolicy'), false); $('#policyStatus').textContent='policy: invalid';
+			} else {
+				addError('policyContent','Unbekannte Antwort'); setBadge($('#badgePolicy'), false);
+			}
+			renderErrors();
+		}
 		async function applyPolicy(){ const content=$('#policyContent').value; const body={content, dry_run:false}; const r=await api('/policy/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); setText('#policyOut', fmt(r)); $('#policyStatus').textContent = r.status==='applied'? 'policy: applied':'policy: ?'; if(r.status==='applied'){ setText('#badgePolicy','policy: applied'); setBadge($('#badgePolicy'), true);} else { setBadge($('#badgePolicy'), false);} }
 		// Memory & quests & thought helpers
 		async function refreshMemory(){ const agentId=$('#agentId')? $('#agentId').value.trim():''; const q=agentId? ('?agent_id='+encodeURIComponent(agentId)) : ''; const r=await api('/memory/list'+q); setText('#memoryOut', fmt(r)); $('#memInfo').textContent = r.items? r.items.length+' Einträge':'-'; }

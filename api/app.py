@@ -227,6 +227,12 @@ def rate_limit(key: str):
     bucket.append(now)
 
 app.mount("/ui", StaticFiles(directory="ui", html=True), name="ui")
+try:
+    # serve static documentation (openapi.yaml etc.)
+    if os.path.isdir("docs"):
+        app.mount("/static-docs", StaticFiles(directory="docs"), name="static-docs")
+except Exception:
+    pass
 
 state: Dict[str, Any] = {"agents": {}, "meta": {"version": app.version, "start": APP_START}}
 event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
@@ -298,6 +304,20 @@ class PlanResponse(BaseModel):
     artifact: str | None = None
     applied_policies: list[str] | None = None
     variants: list[PlanVariant]
+
+class PRFromPlanRequest(BaseModel):
+    intent: str
+    variant_id: str | None = None
+    risk_budget: str | None = None
+    branch: str | None = None
+    dry_run: bool | None = False
+
+class PRFromPlanResponse(BaseModel):
+    status: str
+    branch: str | None = None
+    artifact: str | None = None
+    variant: str | None = None
+    message: str | None = None
 
 class ChatMessage(BaseModel):
     role: str
@@ -998,6 +1018,10 @@ async def on_startup() -> None:  # pragma: no cover - simple init
             asyncio.create_task(_thought_loop())
         except Exception:
             logger.warning("failed to start thought loop")
+    try:
+        asyncio.create_task(_idle_background_loop())
+    except Exception:
+        logger.warning("failed to start idle background loop")
 
 # ---------------- Security ------------------
 API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -1095,6 +1119,10 @@ async def emit_event(kind: str, data: dict[str, Any]) -> None:
         except Exception:
             pass
     await event_queue.put(record)
+    # mark activity (exclude thought noise to allow idle auto ticks)
+    global _last_activity_ts
+    if not kind.startswith("thought."):
+        _last_activity_ts = time.time()
 
 # --------------- Endpoints ------------------
 @app.post("/act")
@@ -1297,6 +1325,24 @@ class PolicyApplyRequest(BaseModel):
     content: str
     dry_run: bool | None = False
 
+class PolicyDryRunRequest(BaseModel):
+    content: str
+
+@app.post("/policy/dry-run")
+async def policy_dry_run(req: PolicyDryRunRequest, agent: str = Depends(require_auth)) -> dict[str, Any]:  # type: ignore[override]
+    rate_limit(agent)
+    import yaml as _yaml
+    try:
+        data = _yaml.safe_load(req.content) or {}
+    except Exception as e:  # noqa: BLE001
+        return {"status": "error", "error": "yaml_parse", "message": str(e)}
+    from policy.model import Policy as _Pol
+    try:
+        new_pol = _Pol.model_validate(data)
+    except Exception as e:  # noqa: BLE001
+        return {"status": "invalid", "error": "validation", "message": str(e)}
+    return {"status": "ok", "policy": new_pol.model_dump()}
+
 @app.post("/policy/apply")
 async def policy_apply(req: PolicyApplyRequest, agent: str = Depends(require_auth)) -> dict[str, Any]:
     rate_limit(agent)
@@ -1424,6 +1470,56 @@ async def plan(req: PlanRequest, agent: str = Depends(require_auth), risk_budget
         applied_policies=artifact['policies'],
         variants=variants,
     )
+
+@app.post("/dev/pr-from-plan", response_model=PRFromPlanResponse)
+async def pr_from_plan(req: PRFromPlanRequest, agent: str = Depends(require_auth)) -> PRFromPlanResponse:  # type: ignore[override]
+    """Create a git branch, generate a plan, persist selected variant artifact and (optionally) push.
+    Requires local git repo and optionally gh CLI for PR creation (if available).
+    """
+    rate_limit(agent)
+    if not os.path.isdir('.git'):
+        return PRFromPlanResponse(status="error", message="not a git repository")
+    # generate plan first (reuse plan logic via internal call)
+    plan_req = PlanRequest(intent=req.intent, context=req.intent, target_paths=[])
+    plan_resp = await plan(plan_req, agent, req.risk_budget)  # type: ignore[arg-type]
+    variant = None
+    if req.variant_id:
+        for v in plan_resp.variants:
+            if v.id == req.variant_id:
+                variant = v
+                break
+    if not variant and plan_resp.variants:
+        variant = plan_resp.variants[0]
+    branch = req.branch or f"plan/{int(time.time())}_{(variant.id if variant else 'base')}"  # type: ignore[union-attr]
+    # safety: sanitize branch name
+    branch = branch.replace('..','.')[:120]
+    if req.dry_run:
+        return PRFromPlanResponse(status="dry-run", branch=branch, artifact=plan_resp.artifact, variant=(variant.id if variant else None))
+    import subprocess
+    try:
+        subprocess.run(["git","checkout","-b",branch], check=True, capture_output=True)
+    except Exception as e:  # noqa: BLE001
+        return PRFromPlanResponse(status="error", message=f"branch create failed: {e}")
+    # commit artifact (already written by plan())
+    try:
+        if plan_resp.artifact:
+            subprocess.run(["git","add", plan_resp.artifact], check=True, capture_output=True)
+            msg = f"Add plan artifact for {req.intent} ({variant.id if variant else 'base'})"
+            subprocess.run(["git","commit","-m",msg], check=True, capture_output=True)
+    except Exception as e:  # noqa: BLE001
+        return PRFromPlanResponse(status="error", message=f"commit failed: {e}")
+    # optional push
+    try:
+        subprocess.run(["git","push","--set-upstream","origin",branch], check=True, capture_output=True)
+        # optional PR via gh
+        try:
+            subprocess.run(["gh","pr","create","--title", f"Plan: {req.intent}", "--body", f"Automatisch erzeugter Plan PR für {req.intent}", "--label","plan"], check=True, capture_output=True)
+        except Exception:
+            pass
+    except Exception as e:  # noqa: BLE001
+        return PRFromPlanResponse(status="error", branch=branch, artifact=plan_resp.artifact, variant=(variant.id if variant else None), message=f"push failed: {e}")
+    await emit_event("plan.pr", {"branch": branch, "variant": (variant.id if variant else None)})
+    return PRFromPlanResponse(status="created", branch=branch, artifact=plan_resp.artifact, variant=(variant.id if variant else None))
 
 @app.get("/")
 async def root() -> HTMLResponse:  # type: ignore[override]
@@ -1567,6 +1663,25 @@ idle_state: dict[str, Any] = {
     "resources": 0,
     "rules_version": 1,
 }
+_last_activity_ts = time.time()
+IDLE_BACKGROUND_INTERVAL = int(os.getenv("IDLE_BACKGROUND_INTERVAL","30"))  # seconds between checks
+IDLE_INACTIVITY_THRESHOLD = int(os.getenv("IDLE_INACTIVITY_THRESHOLD","120"))  # seconds idle before auto tick
+
+async def _idle_background_loop():
+    while True:
+        try:
+            now = time.time()
+            if now - _last_activity_ts > IDLE_INACTIVITY_THRESHOLD:
+                try:
+                    idle_state["tick"] += 1
+                    idle_state["resources"] += 1
+                    await emit_event("idle.tick.auto", {"tick": idle_state["tick"], "resources": idle_state["resources"], "auto": True})
+                except Exception:
+                    pass
+            await asyncio.sleep(IDLE_BACKGROUND_INTERVAL)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("idle background loop error: %s", e)
+            await asyncio.sleep(IDLE_BACKGROUND_INTERVAL)
 
 # ---------------- In-Memory Conversational Memory (multi-agent) -----------------
 MEMORY_LIMIT = int(os.getenv("MEMORY_LIMIT", "200"))
