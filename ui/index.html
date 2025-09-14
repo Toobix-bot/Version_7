@@ -9,6 +9,9 @@
 		main{max-width:1400px;margin:0 auto;}
 		p,li{overflow-wrap:anywhere;}
 		pre{white-space:pre-wrap;word-break:break-word;}
+		.panel pre{max-width:100%;overflow:auto;}
+		.flex-wrap{display:flex;flex-wrap:wrap;gap:6px;}
+		.nowrap{white-space:nowrap;}
 		header{padding:12px 20px;background:#1b1f27;display:flex;align-items:center;gap:16px;}
 		h1{font-size:18px;margin:0;}
 		#tabsBar{display:flex;gap:4px;flex-wrap:wrap;padding:8px 14px;background:#14181f;border-bottom:1px solid #252b33;}
@@ -55,6 +58,16 @@
 		#errorSummary{display:none;background:#3a1214;border:1px solid #803036;color:#fca5a5;padding:8px;border-radius:6px;font-size:12px;line-height:1.35;}
 		.errorField{border-color:#f87171 !important;background:#2b1113 !important;}
 		.microcopy{font-size:11px;opacity:.65;margin-top:2px;}
+		.error-inline{font-size:10px;color:#fda4af;margin-top:2px;display:block;}
+		/* Variant badges */
+		.variantBadges span{display:inline-block;font-size:10px;padding:2px 5px;border-radius:4px;margin-left:4px;line-height:1;border:1px solid #2f3a45;}
+		.risk-low{background:#1f3b2b;color:#6ee7b7;border-color:#25563b;}
+		.risk-medium{background:#3a2f13;color:#facc15;border-color:#8a6a12;}
+		.risk-high{background:#3a1214;color:#fda4af;border-color:#7f2d34;}
+		.explore{background:#142b3a;color:#38bdf8;border-color:#1d4d63;}
+		.depth{background:#243244;color:#9bd2ff;border-color:#324556;}
+		.review-on{background:#1f3b2b;color:#6ee7b7;border-color:#25563b;}
+		.review-off{background:#402727;color:#fca5a5;border-color:#6b3a3f;}
 	</style>
 </head>
 <body>
@@ -78,6 +91,30 @@
 		<div id="tab-uebersicht" class="tabSection active">
 			<section class="panel">
 			<h2>Übersicht</h2>
+			<div id="quickStart" style="display:flex;flex-direction:column;gap:8px;background:#14212a;border:1px solid #27323d;padding:10px;border-radius:6px;">
+				<strong>Quick Start</strong>
+				<div style="display:flex;flex-wrap:wrap;gap:8px;">
+					<div class="qsTile" style="flex:1;min-width:180px;background:#1c2832;border:1px solid #2c3944;border-radius:6px;padding:8px;display:flex;flex-direction:column;gap:6px;">
+						<div style="font-size:12px;font-weight:600;">1) Key prüfen</div>
+						<button id="btnQSAuth" class="secondary" style="font-size:12px;">Auth Check</button>
+						<div class="small" style="line-height:1.3;">Speichert den API Key & versucht eine kleine Anfrage. Badge oben muss grün werden.</div>
+					</div>
+					<div class="qsTile" style="flex:1;min-width:180px;background:#1c2832;border:1px solid #2c3944;border-radius:6px;padding:8px;display:flex;flex-direction:column;gap:6px;">
+						<div style="font-size:12px;font-weight:600;">2) Demo Plan</div>
+						<button id="btnQSDemoPlan" class="secondary" style="font-size:12px;">Plan Idee laden</button>
+						<div class="small" style="line-height:1.3;">Füllt ein Beispiel-Ziel & Dateien. Anschließend auf "Plan erstellen" klicken.</div>
+					</div>
+					<div class="qsTile" style="flex:1;min-width:180px;background:#1c2832;border:1px solid #2c3944;border-radius:6px;padding:8px;display:flex;flex-direction:column;gap:6px;">
+						<div style="font-size:12px;font-weight:600;">3) Events ansehen</div>
+						<button id="btnQSEvents" class="secondary" style="font-size:12px;">Events starten</button>
+						<div class="small" style="line-height:1.3;">Öffnet den Live-Stream. Danach Plan / Vorschläge auslösen um Einträge zu sehen.</div>
+					</div>
+				</div>
+				<div id="planIdeasWrap" style="display:none;flex-direction:column;gap:4px;">
+					<div style="font-size:12px;font-weight:600;">Plan Ideen</div>
+					<div id="planIdeasList" style="display:flex;flex-direction:column;gap:4px;max-height:140px;overflow:auto;border:1px solid #2b313c;padding:6px;border-radius:6px;background:#151a20;font-size:12px;"></div>
+				</div>
+			</div>
 			<div id="onboarding" style="background:#13202c;border:1px solid #27323d;padding:10px;border-radius:6px;line-height:1.4;font-size:12px;display:flex;flex-direction:column;gap:6px;">
 				<strong>Erste Schritte</strong>
 				<ol style="margin:0 0 0 18px;padding:0;display:flex;flex-direction:column;gap:4px;">
@@ -123,6 +160,12 @@
 				<button id="btnPlan">Plan erstellen</button>
 				<button id="btnPlanPR" class="secondary">PR aus Plan</button>
 			</div>
+			<div id="riskPresetBar" class="flex-wrap" style="margin:4px 0 2px;">
+				<button class="secondary" data-rb="low" style="font-size:11px;" title="Konservativ: kleine, sichere Schritte">Vorsichtig</button>
+				<button class="secondary" data-rb="medium" style="font-size:11px;" title="Ausgewogen: moderater Umfang">Ausgewogen</button>
+				<button class="secondary" data-rb="high" style="font-size:11px;" title="Mutig/Experimentell: größere Änderungen">Mutig</button>
+				<span class="microcopy" style="flex-basis:100%;">Preset legt nur Risiko-Filter fest – Varianten enthalten weitere Nuancen.</span>
+			</div>
 			<div id="variantSliderWrap" style="display:none;flex-direction:column;gap:4px;margin:6px 0;">
 				<label style="font-size:11px;display:flex;justify-content:space-between;align-items:center;">Variante wählen
 					<span id="variantSliderLabel" class="pill">-</span></label>
@@ -143,6 +186,9 @@
 			</div>
 			<div id="variantList" style="display:flex;flex-direction:column;gap:6px;max-height:140px;overflow:auto;border:1px solid #2b313c;padding:6px;border-radius:6px;background:#151a20;">
 				<em style="font-size:12px;color:#667">Noch keine Varianten geladen.</em>
+			</div>
+			<div id="variantLegend" class="small" style="display:none;line-height:1.4;background:#14212a;border:1px solid #27323d;padding:6px;border-radius:6px;">
+				<strong>Knobs:</strong> <span class="risk-low">risk low</span> <span class="risk-medium">risk med</span> <span class="risk-high">risk high</span> <span class="depth">Tiefe</span> <span class="explore">Explore Anteil</span> <span class="review-on">Review enforced</span> <span class="review-off">Review off</span>
 			</div>
 			<pre id="planVariantDetail">Variant Detail...</pre>
 			<pre id="planOut">Raw Plan Output...</pre>
@@ -263,6 +309,25 @@
 		<div id="tab-game" class="tabSection">
 			<section class="panel">
 			<h2>Spiel</h2>
+			<div id="storyTutorial" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px;">
+				<div style="flex:1;min-width:180px;background:#1c2430;border:1px solid #2c3742;padding:8px;border-radius:6px;display:flex;flex-direction:column;gap:6px;">
+					<div style="font-size:12px;font-weight:600;">1) Story laden</div>
+					<button id="btnStoryLoad" class="secondary" style="font-size:12px;">Zustand laden</button>
+					<div class="small">Holt aktuellen Fortschritt (Companions, Buffs, Optionen).</div>
+				</div>
+				<div style="flex:1;min-width:180px;background:#1c2430;border:1px solid #2c3742;padding:8px;border-radius:6px;display:flex;flex-direction:column;gap:6px;">
+					<div style="font-size:12px;font-weight:600;">2) Option wählen</div>
+					<button id="btnStoryChooseA" class="secondary" style="font-size:12px;">Option A</button>
+					<button id="btnStoryChooseB" class="secondary" style="font-size:12px;">Option B</button>
+					<button id="btnStoryChooseC" class="secondary" style="font-size:12px;">Option C</button>
+					<div class="small">Wählt eine der verfügbaren Optionen (wird nach Laden gefüllt).</div>
+				</div>
+				<div style="flex:1;min-width:180px;background:#1c2430;border:1px solid #2c3742;padding:8px;border-radius:6px;display:flex;flex-direction:column;gap:6px;">
+					<div style="font-size:12px;font-weight:600;">3) Fortschritt sehen</div>
+					<button id="btnStoryRefresh" class="secondary" style="font-size:12px;">Aktualisieren</button>
+					<div class="small">Zeigt Ressourcen & Log-Veränderungen.</div>
+				</div>
+			</div>
 			<div class="row">
 				<button id="btnIdleState" class="secondary">Status</button>
 				<button id="btnIdleTick">Tick</button>
@@ -315,8 +380,36 @@
 			const key=$('#apiKey').value.trim();
 			const pill=$('#apiKeyStatus');
 			if(!pill) return;
-			if(key){pill.textContent='KEY OK'; pill.style.background='#1f3b2b'; pill.style.color='#6ee7b7';}
-			else {pill.textContent='NO KEY'; pill.style.background='#402727'; pill.style.color='#fca5a5';}
+			if(!key){
+				pill.textContent='NO KEY'; pill.style.background='#402727'; pill.style.color='#fca5a5';
+				return;
+			}
+			// optimistic pending state before ping completes
+			pill.textContent='AUTH...'; pill.style.background='#243244'; pill.style.color='#9fbcd9';
+			scheduleAuthPing();
+		}
+		let _authPingTimer=null; let _lastAuthKey='';
+		function scheduleAuthPing(){
+			if(_authPingTimer) clearTimeout(_authPingTimer);
+			_authPingTimer=setTimeout(pingAuth,350);
+		}
+		async function pingAuth(){
+			const key=$('#apiKey').value.trim();
+			if(!key) return; // already handled by updateApiKeyStatus
+			if(key===_lastAuthKey && $('#apiKeyStatus').dataset.state==='ok') return; // skip repeat
+			let ok=false; let pill=$('#apiKeyStatus');
+			try{
+				// use a lightweight endpoint; /story/state gives 401 if invalid key
+				const r=await fetch('/story/state',{headers:{'X-API-Key':key}});
+				ok = r.ok; // 200 -> valid
+			} catch(err){
+				ok=false;
+			}
+			if(ok){
+				pill.textContent='AUTH OK'; pill.style.background='#1f3b2b'; pill.style.color='#6ee7b7'; pill.dataset.state='ok'; _lastAuthKey=key;
+			} else {
+				pill.textContent='AUTH FAIL'; pill.style.background='#402727'; pill.style.color='#fca5a5'; pill.dataset.state='fail';
+			}
 		}
 		function loadStoredKey(){
 			try{const k=localStorage.getItem('life_agent_api_key'); if(k){$('#apiKey').value=k;}}catch{}
@@ -354,17 +447,33 @@
 			const sum=$('#errorSummary');
 			if(sum){ sum.style.display='none'; sum.innerHTML=''; }
 			document.querySelectorAll('.errorField').forEach(el=>{el.classList.remove('errorField'); el.removeAttribute('aria-invalid');});
+			document.querySelectorAll('.error-inline').forEach(el=>el.remove());
 		}
 		function addError(fieldId,message){
 			_errors.push({field:fieldId,message});
 			const el=document.getElementById(fieldId);
-			if(el){ el.classList.add('errorField'); el.setAttribute('aria-invalid','true'); }
+			if(el){
+				el.classList.add('errorField'); el.setAttribute('aria-invalid','true');
+				// inline message
+				if(!el.closest('label')){
+					const msg=document.createElement('span');
+					msg.className='error-inline'; msg.textContent=message; msg.setAttribute('role','alert');
+					el.insertAdjacentElement('afterend', msg);
+				}
+			}
 		}
 		function renderErrors(){
 			if(!_errors.length) return;
 			const sum=$('#errorSummary'); if(!sum) return;
+			sum.setAttribute('role','alert'); sum.setAttribute('aria-live','assertive');
 			sum.innerHTML='<strong>Fehler ('+_errors.length+')</strong><ul style="margin:4px 0 0 16px;padding:0;">'+_errors.map(e=>'<li><a style="color:#fca5a5;" href="#'+e.field+'">'+e.message+'</a></li>').join('')+'</ul>';
 			sum.style.display='block';
+			// focus first error field
+			const first=_errors[0]; const fel=first? document.getElementById(first.field):null; if(fel){ fel.focus({preventScroll:false}); fel.scrollIntoView({behavior:'smooth', block:'center'}); }
+		}
+		// central API error wrapper (augment existing api consumption selectively later as needed)
+		async function apiSafe(fn, onError){
+			try { return await fn(); } catch(e){ if(onError) onError(e); else { addError('errorSummary','Unerwarteter Fehler: '+(e.message||e)); renderErrors(); } return null; }
 		}
 
 		async function loadMeta(){
@@ -383,6 +492,28 @@
 			$('#chatInfo').textContent = s.configured? 'configured':'not configured';
 			setText('#badgeLLM', 'llm: '+(s.configured? 'on':'off')); setBadge($('#badgeLLM'), s.configured);
 		}
+		async function refreshHealth(){
+			try{ const h=await api('/health/dev'); if(h && h.status==='ok'){
+				setText('#badgeMeta','meta: '+(h.meta_ok?'ok':'-')); setBadge($('#badgeMeta'), h.meta_ok);
+				setText('#badgePolicy','policy: '+(h.policy_ok?'ok':'-')); setBadge($('#badgePolicy'), h.policy_ok);
+				setText('#badgeLLM','llm: '+(h.llm_ok?'on':'off')); setBadge($('#badgeLLM'), h.llm_ok);
+			} }catch(e){ /* ignore */ }
+		}
+		// ---- Story Tutorial Helpers ----
+		let _storyOptionsCache=[];
+		async function storyLoad(){
+			try{ const st=await api('/story/state'); setText('#idleOut', fmt(st)); if(st && st.options){ _storyOptionsCache=st.options.slice(0,3); fillStoryOptionButtons(); } }
+			catch(e){ console.warn('story load fail', e); }
+		}
+		function fillStoryOptionButtons(){ ['A','B','C'].forEach((k,i)=>{ const btn=$('#btnStoryChoose'+k); const opt=_storyOptionsCache[i]; if(btn){ if(opt){ btn.textContent=opt.label||('Option '+k); btn.disabled=false; btn.dataset.optId=opt.id; } else { btn.textContent='-'; btn.disabled=true; btn.removeAttribute('data-opt-id'); } } }); }
+		async function storyChoose(ix){ const opt=_storyOptionsCache[ix]; if(!opt) return; try{ const r=await api('/story/choose',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({option_id:opt.id})}); setText('#idleOut', fmt(r)); storyLoad(); }catch(e){ console.warn('choose fail',e); } }
+		function wireStoryTutorial(){
+			$('#btnStoryLoad').onclick=()=>storyLoad();
+			$('#btnStoryRefresh').onclick=()=>storyLoad();
+			$('#btnStoryChooseA').onclick=()=>storyChoose(0);
+			$('#btnStoryChooseB').onclick=()=>storyChoose(1);
+			$('#btnStoryChooseC').onclick=()=>storyChoose(2);
+		}
 		function renderVariants(r){
 			const box = $('#variantList');
 			box.innerHTML='';
@@ -390,6 +521,8 @@
 				box.innerHTML='<em style="font-size:12px;color:#667">Keine Varianten.</em>';
 				return;
 			}
+			// show legend
+			const legend=$('#variantLegend'); if(legend) legend.style.display='block';
 			// attach to slider
 			const sliderWrap=$('#variantSliderWrap'); const slider=$('#variantSlider'); const lab=$('#variantSliderLabel');
 			if(slider){ slider.max=String(r.variants.length-1); slider.value='0'; sliderWrap.style.display='flex'; }
@@ -402,7 +535,14 @@
 				btn.style.justifyContent='space-between';
 				btn.style.display='flex';
 				btn.style.width='100%';
-				btn.textContent=`${v.label} · depth=${v.knobs?.depth_limit} · risk=${v.knobs?.risk_budget}`;
+				const riskClass = v.knobs?.risk_budget==='low' ? 'risk-low' : (v.knobs?.risk_budget==='medium' ? 'risk-medium':'risk-high');
+				const reviewClass = v.knobs?.review_enforcement? 'review-on':'review-off';
+				btn.innerHTML=`<span>${v.label}</span><span class="variantBadges" style="display:flex;align-items:center;gap:4px;">
+					<span class="depth" title="Tiefe / depth_limit">d${v.knobs?.depth_limit}</span>
+					<span class="explore" title="Explore Anteil">ex${Math.round((v.knobs?.explore||0)*100)}</span>
+					<span class="${riskClass}" title="Risiko Budget">${v.knobs?.risk_budget}</span>
+					<span class="${reviewClass}" title="Review Erzwingung">R</span>
+				</span>`;
 				btn.onclick=()=>{
 					const detail = {
 						id:v.id,
@@ -461,7 +601,9 @@
 			$('#eventsState').textContent='events: connecting';
 			const key=$('#apiKey').value.trim();
 			evtSrc = new EventSource('/events?token='+encodeURIComponent(key));
-			evtSrc.onopen=()=>$('#eventsState').textContent='events: open';
+			let lastHb=Date.now(); let hbTimer=null;
+			function armWatch(){ if(hbTimer) clearInterval(hbTimer); hbTimer=setInterval(()=>{ if(Date.now()-lastHb>25000){ $('#eventsState').textContent='events: stale'; $('#eventsState').style.background='#3a2f13'; $('#eventsState').style.color='#facc15'; } },5000); }
+			evtSrc.onopen=()=>{ $('#eventsState').textContent='events: open'; $('#eventsState').style.background='#1f3b2b'; $('#eventsState').style.color='#6ee7b7'; lastHb=Date.now(); armWatch(); };
 			evtSrc.onmessage=e=>{ 
 				const pre=$('#eventsOut'); 
 				let filter=$('#eventsFilter').value.trim();
@@ -472,6 +614,7 @@
 				if(e.data.includes('suggest.open')){ const m=e.data.match(/"open":\s*(\d+)/); if(m) updateOpenBadge(parseInt(m[1])); }
 				if(e.data.includes('thought.stream')){ refreshThoughts(); }
 				if(e.data.includes('idle.tick.auto')){ try{ const m=e.data.match(/"tick":\s*(\d+)/); if(m){ $('#idleInfo').textContent='auto tick: '+m[1]; } }catch{} }
+				if(e.data.includes(':-hb')){ lastHb=Date.now(); if($('#eventsState').textContent==='events: stale'){ $('#eventsState').textContent='events: open'; $('#eventsState').style.background='#1f3b2b'; $('#eventsState').style.color='#6ee7b7'; } }
 			};
 			evtSrc.onerror=()=>$('#eventsState').textContent='events: error';
 		}
@@ -558,7 +701,36 @@
 		async function genQuest(){ const theme=$('#questTheme').value.trim()||undefined; const difficulty=$('#questDifficulty').value; const body={theme,difficulty}; const r=await api('/quest/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); setText('#questOut', fmt(r)); refreshQuestList(); }
 		// Init
 		buildTabs();
-		loadStoredKey(); loadMeta(); loadLLM(); refreshSuggestList(); refreshThoughts(); refreshMemory(); refreshQuestList();
+		loadStoredKey(); loadMeta(); loadLLM(); refreshSuggestList(); refreshThoughts(); refreshMemory(); refreshQuestList(); wireStoryTutorial(); refreshHealth(); setInterval(refreshHealth, 15000);
+		// Risk preset wiring
+		(function(){
+			const bar=document.getElementById('riskPresetBar'); if(!bar) return;
+			bar.querySelectorAll('button[data-rb]').forEach(btn=>{
+				btn.addEventListener('click',()=>{
+					const rb=btn.getAttribute('data-rb'); const sel=document.getElementById('riskBudget'); if(sel){ sel.value = rb||''; }
+					bar.querySelectorAll('button[data-rb]').forEach(b=>b.classList.remove('active'));
+					btn.classList.add('active');
+				});
+			});
+		})();
+		// Quick Start wiring
+		$('#btnQSAuth').onclick=()=>updateApiKeyStatus();
+		$('#btnQSEvents').onclick=()=>{ activateTab('events'); startEvents(); };
+		$('#btnQSDemoPlan').onclick=async()=>{
+			// fetch ideas once
+			try{
+				const ideas=await api('/plan/ideas');
+				if(ideas && ideas.ideas){
+					const wrap=$('#planIdeasWrap'); const list=$('#planIdeasList'); wrap.style.display='flex'; list.innerHTML='';
+					ideas.ideas.slice(0,8).forEach(it=>{
+						const b=document.createElement('button'); b.className='secondary'; b.style.fontSize='11px'; b.textContent=it.intent; b.title=it.desc; b.onclick=()=>{ $('#planIntent').value=it.intent; $('#planContext').value=it.desc; activateTab('plan'); window.scrollTo({top:0,behavior:'smooth'}); };
+						list.appendChild(b);
+					});
+					// prefill first idea automatically for speed
+					if(ideas.ideas[0]){ $('#planIntent').value=ideas.ideas[0].intent; $('#planContext').value=ideas.ideas[0].desc; }
+				}
+			}catch(err){ console.warn('ideas failed',err); }
+		};
 	</script>
 </body>
 </html>

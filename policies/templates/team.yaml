@@ -1,0 +1,25 @@
+version: 1
+name: team_collaboration
+allowed_dirs:
+  - api
+  - policies
+  - ui
+  - tests
+branching:
+  require_prefixes:
+    - feat/
+    - fix/
+    - chore/
+reviews:
+  min_reviewers: 2
+  required_labels:
+    - reviewed
+rules:
+  - id: large_diff_review
+    description: Diffs > 800 Zeilen benötigen Lead Review.
+    condition: 'lines_changed > 800'
+    action: escalate
+  - id: deny_force_push
+    description: Force-Push ist untersagt.
+    match: '--force'
+    action: deny

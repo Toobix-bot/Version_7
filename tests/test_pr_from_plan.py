@@ -9,3 +9,10 @@ async def test_pr_from_plan_dry_run(client):
     data = resp.json()
     assert data['status'] == 'dry-run'
     assert data['branch'].startswith('plan/')
+
+@pytest.mark.asyncio
+async def test_plan_pr_alias_dry_run(client):
+    resp = await client.post('/plan/pr', json={'intent':'alias feature','dry_run':True}, headers={'X-API-Key':'test'})
+    data = resp.json()
+    assert data['status'] == 'dry-run'
+    assert data['branch'].startswith('plan/')

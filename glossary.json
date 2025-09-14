@@ -1,0 +1,13 @@
+[
+  {"term":"Plan","short":"Strukturierter Änderungsvorschlag mit Varianten.","details":"Ein Plan beschreibt Intent, Kontext und Ziel-Dateien. Varianten differieren in Tiefe & Risiko."},
+  {"term":"Variante","short":"Alternative Ausprägung eines Plans oder einer Antwort.","details":"Parameter verändern Risiko, Tiefe und Explorationsgrad."},
+  {"term":"Suggestion","short":"Konkreter Verbesserungs-Vorschlag.","details":"Durchläuft Status: generated -> (refined/revised) -> approved."},
+  {"term":"Impact Score","short":"Eingeschätzter Nutzen 0–100.","details":"Berechnet beim Approve. Hilft bei Priorisierung."},
+  {"term":"Policy","short":"Regelwerk & Grenzen.","details":"Steuert erlaubte Pfade, Modelle, Sicherheitsfilter."},
+  {"term":"Quest","short":"Ziel im Gamification-Layer.","details":"Fortschritt durch Idle Ticks oder Aktionen. Abschluss erzeugt Event & Metrik."},
+  {"term":"Idle Tick","short":"Zeitbasierter Fortschritt.","details":"Automatischer oder manueller Tick der Idle Engine (Events idle.tick/idle.tick.auto)."},
+  {"term":"Thought Stream","short":"Hintergrund-Gedanken.","details":"Heuristisch generierte Status-Reflexionen, kategorisiert (risk/opportunity/etc.)."},
+  {"term":"Variant Slider","short":"UI-Steuerung für Auswahl.","details":"Ordnet Varianten nach Risikoprofil und stellt fokussierte Auswahl bereit."},
+  {"term":"Wizard","short":"Policy Generator.","details":"Erzeugt Policy aus Template + Zielen + Risiko-Profil."},
+  {"term":"Glossar","short":"Begriffsübersicht.","details":"Hilft neue Nutzer beim schnellen Onboarding."}
+]

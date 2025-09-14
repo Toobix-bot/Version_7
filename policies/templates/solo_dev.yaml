@@ -1,0 +1,19 @@
+version: 1
+name: solo_dev_baseline
+allowed_dirs:
+  - api
+  - policies
+  - ui
+rules:
+  - id: deny_secrets
+    description: Verbietet Änderungen die mögliche Geheimnisse leaken könnten.
+    match: '(?i)(api[_-]?key|secret)'
+    action: deny
+  - id: restrict_exec
+    description: Verbietet gefährliche Prozessaufrufe.
+    match: '(os\.system|subprocess\.)'
+    action: review
+llm:
+  model: llama-3.3-70b-versatile
+  temperature: 0.0
+  max_tokens: 800

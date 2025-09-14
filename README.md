@@ -597,3 +597,126 @@ UI-Hinweis: Aktuell werden Meta-Listen nur via `/story/state` geliefert (compani
 - Tests decken State, Optionen, Actions, Arc-Shifts und Meta-CRUD (Seeds + Create) ab.
 
 
+## Policy Templates & Wizard (Spezifikation – in Arbeit)
+
+Dieser Abschnitt dokumentiert das geplante Policy-Template-System bevor die Implementierung erfolgt. So kann die eigentliche Backend-Integration konsistent und „schema-first" erfolgen.
+
+### Ziele
+* Wiederverwendbare, kuratierte Start-Policies (Solo, Team, Sandbox)
+* Guided Wizard: Benutzer-Ziele + optionaler Risikoprozentsatz → abgeleitete finale Policy
+* LLM (optional) darf nur Ergänzungen (Kommentare, rationale) liefern – keine unkontrollierten Felder
+
+### Template Speicherort
+`policies/templates/*.yaml`
+
+Aktuell vorhanden:
+* `solo_dev.yaml` – Minimaler Sicherheitsrahmen für Einzelentwickler
+* `team.yaml` – Kollaborationsregeln (Branch Prefixes, Reviewer Mindestanzahl)
+* `sandbox.yaml` – Schnelles Experimentieren (lockerer, Fokus auf Credential-Schutz)
+
+### Gemeinsame Template Felder
+```yaml
+version: 1
+name: <string>
+allowed_dirs: [list von Pfaden]
+rules:                # polymorph, engine-spezifisch
+	- id: <string>
+		description: <string>
+		match|condition: <regex oder Ausdruck>
+		action: allow|deny|review|escalate
+llm:                  # optional
+	model: <string>
+	temperature: <float>
+	max_tokens: <int>
+branching:            # optional (team)
+	require_prefixes: [feat/, fix/, chore/]
+reviews:              # optional (team)
+	min_reviewers: 2
+	required_labels: [reviewed]
+```
+
+### Wizard Endpoint (geplant)
+`POST /policy/wizard`
+
+Request Body (JSON):
+```json
+{
+	"template": "solo_dev",        "goals": ["schneller review", "klare sicherheitsgrenzen"],
+	"risk_profile": "low|medium|high", "overrides": {"allowed_dirs": ["api", "ui", "policies"], "llm": {"model": "llama-3.3-70b-versatile", "temperature": 0.0}},
+	"annotate": true
+}
+```
+
+Response (200):
+```json
+{
+	"source_template": "solo_dev",
+	"policy": {
+		"version": 1,
+		"name": "solo_dev_baseline",
+		"allowed_dirs": ["api", "policies", "ui"],
+		"rules": [ {"id": "deny_secrets", "action": "deny", "description": "..."} ],
+		"llm": {"model": "llama-3.3-70b-versatile", "temperature": 0.0, "max_tokens": 800},
+		"_meta": {"goals": ["schneller review", "klare sicherheitsgrenzen"], "risk_profile": "low", "generated_at": "2025-09-14T10:15:00Z"}
+	},
+	"diff": {"added_rules": [], "changed": {"allowed_dirs": {"from": ["api","policies","ui"], "to": ["api","policies","ui"]}}, "removed_rules": []},
+	"notes": ["Risk Profile low → erzwingt niedrige LLM Temperatur"]
+}
+```
+
+Error Cases:
+* 404 Template nicht gefunden
+* 422 Ungültige Overrides (Schema-Verstoß)
+* 429 Zu viele Wizard-Aufrufe (Rate Limit – geplant)
+
+### Verarbeitungsschritte (geplant)
+1. Template laden (Datei → Parse YAML)
+2. Validierung gegen internes Policy-Schema
+3. Goals Normalisierung (lowercase, trim)
+4. Heuristische Anpassungen anhand `risk_profile` (z.B. `max_diff_lines`, zusätzliche review-Regeln)
+5. Overrides anwenden (whitelist-basierte Feld-Merge)
+6. Optional: Annotation (LLM → nur erläuternde Strings, keine Strukturänderung)
+7. Diff berechnen (Vorher/Nachher) → `diff` Objekt
+8. Response signieren (X-Request-Id Header bleibt Quelle der Korrelation)
+
+### Sicherheitsleitplanken
+* Keine dynamische Code-Auswertung in `condition`
+* Regex Sandbox (Timeout, Kompilierung vor Nutzung)
+* LLM darf keine neuen Root-Felder erzeugen (Strict Merge)
+* Overrides nur in expliziter Allowlist: `allowed_dirs`, `rules`, `llm`, `branching`, `reviews`
+
+### Entscheidungspunkte (offen)
+| Thema | Option A | Option B | Status |
+|-------|----------|----------|--------|
+| Diff Format | Einfach (added/removed/changed) | Voll AST mit Kontext | A (vorerst) |
+| Rules Engine | Regex + einfache Conditions | OPA / Rego Integration | A (MVP) |
+| LLM Nutzung | Optional Annotation | Vollständige Rule Synthese | A (konservativ) |
+| Persistenz Ergebnis | Nein (nur Return) | Speichern unter `policy/generated/*.yaml` | Offen |
+| Rate Limit | Global Counter | Per API Key Window | Offen |
+
+### Beispiel cURL (geplant)
+```bash
+curl -X POST http://localhost:8000/policy/wizard \
+	-H "X-API-Key: test" \
+	-H "Content-Type: application/json" \
+	-d '{
+				"template": "solo_dev",
+				"goals": ["klarheit", "schnelle iteration"],
+				"risk_profile": "low",
+				"annotate": true
+			}'
+```
+
+### Nächste Implementierungsschritte
+1. Endpunkt + Schema Klassen (Pydantic) anlegen
+2. Template Loader + Cache
+3. Risk Profile Heuristik Mapping
+4. Diff Utility
+5. (Optional) Annotation Adapter (call_groq_json)
+6. Tests (Template existiert / nicht gefunden, Overrides, Risk Profile)
+
+---
+
+Hinweis: Diese Spezifikation dient als Vorlauf. Implementierung folgt, sobald Backend-Kontext bestätigt wurde.
+
+

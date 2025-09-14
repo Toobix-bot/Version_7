@@ -12,6 +12,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 from functools import wraps
 from typing import Any, AsyncGenerator, Dict, Callable, Awaitable, TypeVar, Coroutine, cast
+from .routes import wizard as wizard_routes  # Phase1: extracted wizard route
 
 from fastapi import FastAPI, Depends, HTTPException, status, Request, Header, Body, Query
 from fastapi.openapi.utils import get_openapi
@@ -232,6 +233,7 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         return response
 
 app.add_middleware(RequestContextMiddleware)
+app.include_router(wizard_routes.router)
 
 # -------- Simple Rate Limiter --------
 RATE_LIMIT_RPS = 5
@@ -305,6 +307,12 @@ THOUGHT_CATEGORY_TOTAL = Counter("thought_category_total", "Thoughts per categor
 QUEST_COMPLETED_TOTAL = Counter("quest_completed_total", "Completed quests", registry=REGISTRY)
 STORY_EVENTS_TOTAL = Counter("story_events_total", "Story events count", ["kind"], registry=REGISTRY)
 STORY_OPTIONS_OPEN = Gauge("story_options_open", "Offene Story Optionen", registry=REGISTRY)
+PLAN_VARIANT_GENERATED_TOTAL = Counter(
+    "plan_variant_generated_total",
+    "Generated plan variants",
+    ["variant_id", "risk_budget", "explore"],
+    registry=REGISTRY,
+)
 
 # ---- Balance Parameter (env overrides) ----
 XP_BASE = float(os.getenv("STORY_XP_BASE", "80"))
@@ -356,6 +364,18 @@ class PlanResponse(BaseModel):
     applied_policies: list[str] | None = None
     variants: list[PlanVariant]
 
+class PlanIdeasResponse(BaseModel):
+    status: str
+    ideas: list[dict[str, str]]
+
+class HealthDevResponse(BaseModel):
+    status: str
+    meta_ok: bool
+    policy_ok: bool
+    llm_ok: bool
+    auth_mode: str
+    version: str | None = None
+
 class PRFromPlanRequest(BaseModel):
     intent: str
     variant_id: str | None = None
@@ -369,6 +389,7 @@ class PRFromPlanResponse(BaseModel):
     artifact: str | None = None
     variant: str | None = None
     message: str | None = None
+    pr_url: str | None = None  # optional URL of created PR
 
 class ChatMessage(BaseModel):
     role: str
@@ -386,6 +407,79 @@ class ChatResponse(BaseModel):
     model: str
     content: str
     usage: dict[str, Any] | None = None
+
+# ---- Groq JSON Mode Wrapper (deterministic structured responses) ----
+class GroqJSONError(Exception):
+    pass
+
+async def call_groq_json(prompt: str, schema: dict[str, Any], timeout: float = 22.0, temperature: float = 0.0, model: str | None = None) -> dict[str, Any]:
+    """Call Groq (if configured) requesting a deterministic JSON object.
+
+    Falls kein GROQ_API_KEY gesetzt ist, wird ein Dummy-Response erzeugt, der Schema-Keys auffüllt.
+    Schema ist ein einfaches Dict mit optionalen default Werten; tiefe Validierung minimal.
+    """
+    api_key = os.getenv("GROQ_API_KEY")
+    # naive default fill function
+    def _fill(s: dict[str, Any]) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for k,v in s.items():
+            if isinstance(v, dict):
+                # nested schema or default object
+                if any(isinstance(x, (dict,list)) for x in v.values()):
+                    out[k] = _fill(v)
+                else:
+                    out[k] = v if not isinstance(v, (int,float,str,bool)) else v
+            else:
+                # primitive default placeholder
+                if isinstance(v, (int,float,str,bool)):
+                    out[k] = v
+                else:
+                    out[k] = "" if v is None else str(v)
+        return out
+    if not api_key:
+        return _fill(schema)
+    try:
+        import groq  # type: ignore
+    except Exception as e:  # pragma: no cover
+        raise GroqJSONError(f"groq_sdk_import_failed: {e}")
+    client = groq.Groq(api_key=api_key)  # type: ignore[attr-defined]
+    sys_prompt = (
+        "Du gibst ausschließlich gültiges JSON zurück. Keine Erklärungen. Nur ein einzelnes JSON Objekt passend zum Schema."  # noqa: E501
+    )
+    user_prompt = (
+        f"Schema (Keys / Struktur, Werte = Defaults oder Platzhalter):\n{json.dumps(schema, indent=2, ensure_ascii=False)}\n\n"  # noqa: E501
+        f"Anforderung:\n{prompt}\n\nGib nur JSON zurück."  # noqa: E501
+    )
+    import asyncio as _asyncio
+    async def _do_call():  # isolate for timeout
+        completion = await _asyncio.get_event_loop().run_in_executor(None, lambda: client.chat.completions.create(
+            model = model or os.getenv("GROQ_MODEL","llama-3.3-70b-versatile"),
+            temperature = temperature,
+            max_tokens = 800,
+            messages = [
+                {"role":"system","content": sys_prompt},
+                {"role":"user","content": user_prompt},
+            ],
+            response_format={"type":"json_object"},  # Structured response
+        ))
+        return completion
+    try:
+        completion = await asyncio.wait_for(_do_call(), timeout=timeout)
+    except Exception as e:  # noqa: BLE001
+        raise GroqJSONError(f"groq_call_failed: {e}")
+    try:
+        content = completion.choices[0].message.content  # type: ignore[attr-defined]
+    except Exception as e:  # noqa: BLE001
+        raise GroqJSONError(f"groq_no_content: {e}")
+    try:
+        obj = json.loads(content)
+    except Exception as e:  # noqa: BLE001
+        raise GroqJSONError(f"groq_invalid_json: {e}")
+    # minimal key presence check
+    for key in schema.keys():
+        if key not in obj:
+            obj[key] = schema[key] if not isinstance(schema[key], dict) else _fill(schema[key])
+    return obj
     persona: str | None = None  # echo persona
 
 class EnvInfoResponse(BaseModel):
@@ -459,6 +553,7 @@ class Thought(BaseModel):
     kind: str = "thought"
     meta: dict[str, Any] | None = None
     category: str | None = None
+    pinned: bool | None = False
 class ThoughtStreamResponse(BaseModel):
     items: list[Thought]
     total: int
@@ -1059,6 +1154,17 @@ def init_db() -> None:
             category TEXT,
             updated_at REAL NOT NULL
         );
+        -- Idle Quests table (progress tracking for idle game layer)
+        CREATE TABLE IF NOT EXISTS idle_quests (
+            id INTEGER PRIMARY KEY,
+            goal TEXT NOT NULL,
+            required INTEGER NOT NULL,
+            progress INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL,
+            tags TEXT, -- JSON array of string tags
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        );
         """
     )
     db_conn.commit()
@@ -1279,10 +1385,18 @@ async def healthz() -> dict[str, str]:
 
 
 @app.get("/events")
-async def events_stream(request: Request, agent: str = Depends(require_auth)) -> StreamingResponse:
+async def events_stream(request: Request, agent: str = Depends(require_auth), kinds: str | None = Query(default=None)) -> StreamingResponse:  # type: ignore[override]
     rate_limit(agent)
     heartbeat_interval = float(os.getenv("SSE_HEARTBEAT_INTERVAL", "15"))
     poll_timeout = float(os.getenv("SSE_POLL_TIMEOUT", "1"))
+    allowed: set[str] | None = None
+    if kinds:
+        try:
+            allowed = {k.strip() for k in kinds.split(',') if k.strip()}
+            if not allowed:
+                allowed = None
+        except Exception:
+            allowed = None
     async def event_gen() -> AsyncGenerator[bytes, None]:
         # Initial directives + ready event for clients/tests
         yield b"retry: 5000\n"
@@ -1297,12 +1411,14 @@ async def events_stream(request: Request, agent: str = Depends(require_auth)) ->
             now = time.time()
             try:
                 evt = await asyncio.wait_for(_get_event_queue().get(), timeout=poll_timeout)
-                payload = f"event: {evt['kind']}\ndata: {json.dumps(evt)}\n\n".encode()
-                yield payload
+                if allowed is None or evt['kind'] in allowed:
+                    payload = f"event: {evt['kind']}\ndata: {json.dumps(evt)}\n\n".encode()
+                    yield payload
             except asyncio.TimeoutError:
                 pass
             if now - last_keepalive >= heartbeat_interval:
-                yield b":keepalive\n\n"
+                # unified short heartbeat marker
+                yield b":-hb\n\n"
                 last_keepalive = now
     return StreamingResponse(event_gen(), media_type="text/event-stream")
 
@@ -1351,6 +1467,21 @@ input[type=text]{width:100%;padding:6px;background:#111722;color:#fff;border:1px
 .res[data-k="level"] .bar span{background:linear-gradient(90deg,#ef4444,#f87171)}
 </style></head><body>
 <h1>Story <small id=sseStatus style='font-size:12px;color:#888'>[SSE: init]</small></h1>
+<div id="helpOverlay" style="position:fixed;right:16px;bottom:16px;z-index:9999;background:#111827;border:1px solid #374151;padding:12px 14px;width:300px;max-height:60vh;overflow:auto;border-radius:10px;box-shadow:0 4px 18px -2px #0009;font-size:12px;display:none">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+        <strong style="font-size:13px">Hilfe & Kontext</strong>
+        <button id="helpClose" style="background:#1f2937;border:0;color:#9ca3af;font-size:16px;line-height:16px;cursor:pointer">×</button>
+    </div>
+    <div id="helpTabs" style="display:flex;gap:6px;margin-bottom:6px">
+        <button data-tab="tips" class="htab active" style="flex:1;background:#2563eb;border:0;padding:4px 6px;border-radius:4px;color:#fff;cursor:pointer;font-size:11px">Tipps</button>
+        <button data-tab="gloss" class="htab" style="flex:1;background:#374151;border:0;padding:4px 6px;border-radius:4px;color:#fff;cursor:pointer;font-size:11px">Glossar</button>
+    </div>
+    <div id="helpContent"></div>
+    <div style="margin-top:8px;text-align:right">
+        <button id="helpPin" style="background:#374151;border:0;color:#d1d5db;padding:3px 8px;font-size:11px;border-radius:4px;cursor:pointer">Pin</button>
+    </div>
+</div>
+<button id="helpToggle" style="position:fixed;right:16px;bottom:16px;z-index:9998;background:#2563eb;border:none;color:#fff;padding:10px 14px;border-radius:50%;font-size:18px;cursor:pointer;box-shadow:0 4px 12px -2px #000a">?</button>
 <div class=flex>
  <div class=col>
     <section id=stateSec><h2>Zustand</h2><div id=stateBox>lade...</div>
@@ -1394,6 +1525,29 @@ function regen(){fetchJSON('/story/options/regen',{method:'POST'}).then(_=>loadS
 function prependLog(ev){const box=document.getElementById('logBox'); const div=document.createElement('div');div.className='log-item kind-'+ev.kind; div.innerHTML=`[${ev.epoch}] <span>${ev.kind}</span>: ${ev.text}`; box.prepend(div)}
 document.getElementById('btnFree').onclick=free; document.getElementById('btnAdvance').onclick=advance; document.getElementById('btnRegen').onclick=regen;
 loadState(); loadLog();
+// Help Overlay Logic
+const helpToggle=document.getElementById('helpToggle');
+const helpOverlay=document.getElementById('helpOverlay');
+const helpContent=document.getElementById('helpContent');
+const helpClose=document.getElementById('helpClose');
+const helpPin=document.getElementById('helpPin');
+let helpPinned=false; let lastEvents=[]; let glossary=[];
+function renderHelpTips(){
+    const latest=lastEvents.slice(-5).reverse().map(e=>`<li><code>${e.kind}</code> – ${(e.data&&e.data.intent)?e.data.intent:''}</li>`).join('')||'<li>(noch keine)</li>';
+    helpContent.innerHTML=`<div><b>Letzte Events</b><ul style='margin:4px 0 8px 16px;padding:0'>${latest}</ul><b>Schnelle Aktionen</b><ul style='margin:4px 0 0 16px;padding:0'><li>Arc prüfen → Zustand Tab</li><li>Neue Optionen → "Optionen neu"</li><li>Policy Wizard testen → /policy/wizard</li></ul></div>`;
+}
+function renderHelpGloss(){
+    if(!glossary.length){helpContent.innerHTML='<em>lade...</em>';return;}
+    helpContent.innerHTML='<div style="max-height:36vh;overflow:auto">'+glossary.map(g=>`<div style='margin-bottom:6px'><b>${g.term}</b><br><span style='opacity:.8'>${g.short}</span></div>`).join('')+'</div>';
+}
+function setHelpTab(tab){document.querySelectorAll('#helpTabs .htab').forEach(b=>{b.classList.toggle('active',b.dataset.tab===tab); if(b.classList.contains('active')){b.style.background='#2563eb'} else {b.style.background='#374151'} }); if(tab==='gloss'){renderHelpGloss()} else {renderHelpTips()}}
+helpToggle.onclick=()=>{helpOverlay.style.display = helpOverlay.style.display==='none'?'block':'none'; if(helpOverlay.style.display==='block'){renderHelpTips()}};
+helpClose.onclick=()=>{ if(!helpPinned){helpOverlay.style.display='none'} };
+helpPin.onclick=()=>{helpPinned=!helpPinned; helpPin.textContent=helpPinned?'Unpin':'Pin'; helpPin.style.background=helpPinned?'#10b981':'#374151'}
+document.getElementById('helpTabs').addEventListener('click',e=>{const t=e.target.closest('button'); if(!t)return; setHelpTab(t.dataset.tab) });
+fetchJSON('/glossary').then(g=>{glossary=g||[]; if(helpOverlay.style.display==='block'){renderHelpGloss()}}).catch(()=>{});
+// Capture events for overlay
+function trackEvent(ev){try{lastEvents.push(ev); if(lastEvents.length>50) lastEvents=lastEvents.slice(-50); if(helpOverlay.style.display==='block' && !document.querySelector('#helpTabs .htab.active[data-tab="gloss"]')){renderHelpTips();}}catch(_){}}
 // SSE
 let es; let esRetry=0; const maxRetry=10; const statusEl=document.getElementById('sseStatus');
 function sseSet(st, color){ if(statusEl){ statusEl.textContent='[SSE: '+st+']'; statusEl.style.color=color||'#888'; } }
@@ -1405,6 +1559,7 @@ function startSSE(){
         es.onmessage=()=>{};
         es.addEventListener('story.state',()=>{loadState()});
         es.addEventListener('story.event',()=>{loadLog()});
+                es.addEventListener('story.event',e=>{try{trackEvent(JSON.parse(e.data))}catch(_){}});
         es.onerror=()=>{ es.close(); sseSet('getrennt','#f59e0b'); if(esRetry<maxRetry){ const t = Math.min(10000, 500 * Math.pow(1.6, esRetry)); esRetry++; setTimeout(startSSE,t);} else { sseSet('fail','#ef4444'); } };
     }catch(e){ console.warn('SSE fail',e); sseSet('fehler','#ef4444'); }
 }
@@ -1498,6 +1653,124 @@ async def policy_apply(req: PolicyApplyRequest, agent: str = Depends(require_aut
     await emit_event("policy.apply", {"path": target_path, "version": getattr(new_pol, 'version', None)})
     return {"status": "applied", "path": target_path, "policy": new_pol.model_dump()}
 
+"""Policy Wizard models & endpoint moved to services/policy_wizard.py and routes/wizard.py (Phase1)."""
+
+# -------- Multi-IO Scaffold --------
+class MultiIORequest(BaseModel):
+    user_input: str | None = None
+    shared_context: str | None = None
+    system_guidance: str | None = None
+    mode: str | None = "default"
+
+    def combined(self) -> str:
+        parts = []
+        if self.system_guidance:
+            parts.append(f"[system]\n{self.system_guidance.strip()}")
+        if self.shared_context:
+            parts.append(f"[context]\n{self.shared_context.strip()}")
+        if self.user_input:
+            parts.append(f"[user]\n{self.user_input.strip()}")
+        return "\n\n".join(parts)
+
+# Placeholder service for variant building reuse
+def build_variants(kind: str, base: dict[str, Any], profiles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for p in profiles:
+        d = {"kind": kind, **p}
+        # simple summary heuristics
+        depth = p.get("depth_limit")
+        explore = p.get("explore")
+        d["summary"] = f"Variante {p.get('id')} (Tiefe={depth}, Explore={explore})" if depth or explore else p.get("id")
+        out.append(d)
+    return out
+
+TEMPLATE_DIR = os.path.join(POLICY_DIR, "templates")
+
+def _load_template(name: str) -> dict[str, Any]:
+    import yaml as _yaml
+    safe = re.sub(r"[^a-zA-Z0-9_-]", "", name)
+    path = os.path.join(TEMPLATE_DIR, f"{safe}.yaml")
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail={"code": "template_not_found", "template": name})
+    with open(path, "r", encoding="utf-8") as f:
+        try:
+            data = _yaml.safe_load(f) or {}
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail={"code": "template_yaml_error", "message": str(e)})
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=422, detail={"code": "template_invalid", "message": "root not mapping"})
+    return data
+
+def _apply_risk_profile(doc: dict[str, Any], risk: str | None, notes: list[str]):
+    if not risk:
+        return
+    risk = risk.lower()
+    if risk not in ("low","medium","high"):
+        notes.append(f"ignoriert unbekanntes risk_profile '{risk}'")
+        return
+    # heuristic tweaks: add synthetic rule or adjust llm temperature if present
+    if risk == "low":
+        # enforce deterministic llm
+        llm = doc.setdefault("llm", {})
+        if isinstance(llm, dict):
+            prev = llm.get("temperature")
+            llm["temperature"] = 0.0
+            # Immer vermerken (auch wenn bereits 0.0), damit Tests & Nutzer Feedback erhalten
+            if prev != 0.0:
+                notes.append("Risk Profile low → temperature=0.0 (angepasst)")
+            else:
+                notes.append("Risk Profile low bestätigt (temperature bereits 0.0)")
+    elif risk == "high":
+        llm = doc.setdefault("llm", {})
+        if isinstance(llm, dict):
+            prev = llm.get("temperature")
+            llm.setdefault("temperature", 0.2)
+            if prev is None:
+                notes.append("Risk Profile high → default temperature=0.2 gesetzt")
+
+def _merge_overrides(base: dict[str, Any], overrides: dict[str, Any] | None, notes: list[str]):
+    if not overrides:
+        return
+    allow = {"allowed_dirs","rules","llm","branching","reviews","name"}
+    for k, v in overrides.items():
+        if k not in allow:
+            notes.append(f"override feld '{k}' nicht erlaubt – ignoriert")
+            continue
+        base[k] = v
+        notes.append(f"override angewendet: {k}")
+
+def _compute_diff(orig: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
+    added: dict[str, Any] = {}
+    removed: dict[str, Any] = {}
+    changed: dict[str, dict[str, Any]] = {}
+    for k in new.keys() - orig.keys():
+        added[k] = new[k]
+    for k in orig.keys() - new.keys():
+        removed[k] = orig[k]
+    for k in orig.keys() & new.keys():
+        if orig[k] != new[k]:
+            changed[k] = {"from": orig[k], "to": new[k]}
+    return {"added": added, "removed": removed, "changed": changed}
+
+"""/policy/wizard provided by router include above."""
+
+# -------- Glossary --------
+
+@app.get("/glossary")
+async def glossary(agent: str = Depends(require_auth)) -> list[dict[str, Any]]:  # type: ignore[override]
+    rate_limit(agent)
+    path = os.path.join(os.getcwd(), "glossary.json")
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return data
+        return []
+    except Exception:
+        return []
+
 # helper enforcement
 
 def risk_gate(text: str):
@@ -1550,9 +1823,11 @@ async def plan(req: PlanRequest, agent: str = Depends(require_auth), risk_budget
     base_intent = norm['intent'] or 'plan'
     rb = (risk_budget or 'balanced').lower()
     variant_specs = [
-        {"id": "v_safe", "label": "Vorsichtig", "risk_level": "vorsichtig", "temperature": 0.0, "depth_limit": 3, "risk_budget": "low"},
-        {"id": "v_bal", "label": "Balanciert", "risk_level": "balanciert", "temperature": 0.0, "depth_limit": 5, "risk_budget": "medium"},
-        {"id": "v_bold", "label": "Mutig", "risk_level": "mutig", "temperature": 0.2, "depth_limit": 8, "risk_budget": "high"},
+        {"id": "v_safe", "label": "Vorsichtig", "risk_level": "vorsichtig", "temperature": 0.0, "depth_limit": 3, "risk_budget": "low", "explore": 0.1, "review_enforcement": True},
+        {"id": "v_bal", "label": "Balanciert", "risk_level": "balanciert", "temperature": 0.0, "depth_limit": 5, "risk_budget": "medium", "explore": 0.25, "review_enforcement": True},
+        {"id": "v_focus", "label": "Fokussiert", "risk_level": "fokussiert", "temperature": 0.1, "depth_limit": 6, "risk_budget": "medium", "explore": 0.15, "review_enforcement": True},
+        {"id": "v_exp", "label": "Experimentell", "risk_level": "experimentell", "temperature": 0.35, "depth_limit": 7, "risk_budget": "high", "explore": 0.5, "review_enforcement": False},
+        {"id": "v_bold", "label": "Mutig", "risk_level": "mutig", "temperature": 0.2, "depth_limit": 8, "risk_budget": "high", "explore": 0.4, "review_enforcement": False},
     ]
     # Reorder to emphasize requested risk_budget first if provided
     if rb in ("low","medium","high"):
@@ -1561,10 +1836,10 @@ async def plan(req: PlanRequest, agent: str = Depends(require_auth), risk_budget
 
     variants: list[PlanVariant] = []
     for spec in variant_specs:
-        summary = f"{spec['label']} Variante für '{base_intent}' mit Tiefe {spec['depth_limit']}"
+        summary = f"{spec['label']} Variante für '{base_intent}' (Tiefe {spec['depth_limit']}, Explore {spec['explore']})"
         explanation = (
             "Konservativer Ansatz mit minimalem Risiko." if spec['risk_budget']=="low" else
-            ("Ausgewogene Änderungen mit moderatem Umfang." if spec['risk_budget']=="medium" else "Aggressivere Variante mit erweiterten Änderungen.")
+            ("Ausgewogene Änderungen mit moderatem Umfang." if spec['risk_budget']=="medium" else "Aggressivere / explorative Variante mit erweiterten Änderungen.")
         )
         patch_preview = None
         try:
@@ -1583,11 +1858,22 @@ async def plan(req: PlanRequest, agent: str = Depends(require_auth), risk_budget
                 "temperature": spec['temperature'],
                 "risk_budget": spec['risk_budget'],
                 "depth_limit": spec['depth_limit'],
+                "explore": spec['explore'],
+                "review_enforcement": spec['review_enforcement'],
             },
             summary=summary,
             explanation=explanation,
             patch_preview=patch_preview,
         ))
+        try:
+            PLAN_VARIANT_GENERATED_TOTAL.labels(
+                variant_id=spec['id'],
+                risk_budget=spec['risk_budget'],
+                explore=str(spec['explore'])
+            ).inc()
+        except Exception:
+            # metrics should never break endpoint
+            pass
 
     return PlanResponse(
         status="created",
@@ -1595,6 +1881,41 @@ async def plan(req: PlanRequest, agent: str = Depends(require_auth), risk_budget
         applied_policies=artifact['policies'],
         variants=variants,
     )
+
+@app.get("/plan/ideas", response_model=PlanIdeasResponse)
+async def plan_ideas(agent: str = Depends(require_auth)) -> PlanIdeasResponse:  # type: ignore[override]
+    """Einfache Liste möglicher Plan-Intents für Einsteiger.
+
+    Statisch / heuristisch – später kann dies dynamisch (Code-Analyse, Metriken) generiert werden.
+    """
+    base_ideas = [
+        {"intent": "Health Endpoint hinzufügen", "desc": "Neuen /health oder /health/dev Endpunkt bereitstellen."},
+        {"intent": "Logging vereinheitlichen", "desc": "Bestehende print/log Stellen in strukturiertes Logging umwandeln."},
+        {"intent": "Tests erweitern", "desc": "Fehlende Tests für Plan Varianten & Policy Validierung ergänzen."},
+        {"intent": "README Quick Start verbessern", "desc": "Kurzanleitung + Badges + erste Schritte."},
+        {"intent": "Story Metriken hinzufügen", "desc": "Prometheus Counter/Gauge für story_beats_total etc."},
+        {"intent": "Policy Templates anlegen", "desc": "Vorlagen (solo_dev/team/sandbox) unter /policies hinzufügen."},
+        {"intent": "SSE Heartbeat härten", "desc": "Heartbeat Format vereinheitlichen und Client-Retry verbessern."},
+        {"intent": "Groq JSON Wrapper bauen", "desc": "Abstraktion für deterministische JSON Responses."},
+        {"intent": "Suggestion Impact Score verfeinern", "desc": "Gewichtung nach Dateityp / Änderungstiefe."},
+        {"intent": "Story Onboarding vereinfachen", "desc": "Defaults + Mini Tutorial + 3 Start-Optionen."},
+    ]
+    return PlanIdeasResponse(status="ok", ideas=base_ideas)
+
+@app.get("/health/dev", response_model=HealthDevResponse)
+async def health_dev(agent: str = Depends(require_auth)) -> HealthDevResponse:  # type: ignore[override]
+    """Aggregierter Dev-Health: vereinfacht für UI Badges.
+
+    meta_ok: Basis-Meta verfügbar
+    policy_ok: aktuelle Policy geladen (oder nicht leer)
+    llm_ok: LLM konfiguriert (GROQ_API_KEY gesetzt oder interner Flag)
+    auth_mode: 'multi' wenn mehrere Tokens, sonst 'single'
+    """
+    meta_ok = True if state.get('meta') else False
+    policy_ok = bool(policies.get('rules'))
+    llm_ok = bool(os.getenv('GROQ_API_KEY'))  # simple heuristic
+    auth_mode = 'multi' if len(API_TOKENS) > 1 else 'single'
+    return HealthDevResponse(status="ok", meta_ok=meta_ok, policy_ok=policy_ok, llm_ok=llm_ok, auth_mode=auth_mode, version=state.get('meta',{}).get('version'))
 
 @app.post("/dev/pr-from-plan", response_model=PRFromPlanResponse)
 async def pr_from_plan(req: PRFromPlanRequest, agent: str = Depends(require_auth)) -> PRFromPlanResponse:  # type: ignore[override]
@@ -1634,17 +1955,42 @@ async def pr_from_plan(req: PRFromPlanRequest, agent: str = Depends(require_auth
     except Exception as e:  # noqa: BLE001
         return PRFromPlanResponse(status="error", message=f"commit failed: {e}")
     # optional push
+    pr_url: str | None = None
     try:
         subprocess.run(["git","push","--set-upstream","origin",branch], check=True, capture_output=True)
-        # optional PR via gh
+        # optional PR via gh (draft + labels)
         try:
-            subprocess.run(["gh","pr","create","--title", f"Plan: {req.intent}", "--body", f"Automatisch erzeugter Plan PR für {req.intent}", "--label","plan"], check=True, capture_output=True)
+            cp = subprocess.run([
+                "gh","pr","create",
+                "--title", f"Plan: {req.intent}",
+                "--body", f"Automatisch erzeugter Plan PR für {req.intent}",
+                "--label","plan",
+                "--label","ready-for-copilot",
+                "--draft"
+            ], check=True, capture_output=True)
+            try:
+                out_txt = cp.stdout.decode(errors='ignore').strip()
+                import re as _re
+                m = _re.findall(r'https?://\S+', out_txt)
+                if m:
+                    pr_url = m[-1]
+            except Exception:
+                pass
         except Exception:
             pass
     except Exception as e:  # noqa: BLE001
         return PRFromPlanResponse(status="error", branch=branch, artifact=plan_resp.artifact, variant=(variant.id if variant else None), message=f"push failed: {e}")
     await emit_event("plan.pr", {"branch": branch, "variant": (variant.id if variant else None)})
-    return PRFromPlanResponse(status="created", branch=branch, artifact=plan_resp.artifact, variant=(variant.id if variant else None))
+    return PRFromPlanResponse(status="created", branch=branch, artifact=plan_resp.artifact, variant=(variant.id if variant else None), pr_url=pr_url)
+
+@app.post("/plan/pr", response_model=PRFromPlanResponse)
+async def plan_pr(req: PRFromPlanRequest, agent: str = Depends(require_auth)) -> PRFromPlanResponse:  # type: ignore[override]
+    """Alias für /dev/pr-from-plan (zukünftige Stable Route).
+
+    Nutzt identische Logik (Branch-Erstellung, Commit, optionaler PR Draft) und ermöglicht clients das stabilere
+    Präfix /plan/pr zu verwenden.
+    """
+    return await pr_from_plan(req, agent)
 
 @app.get("/")
 async def root() -> HTMLResponse:  # type: ignore[override]
@@ -1792,6 +2138,80 @@ _last_activity_ts = time.time()
 IDLE_BACKGROUND_INTERVAL = int(os.getenv("IDLE_BACKGROUND_INTERVAL","30"))  # seconds between checks
 IDLE_INACTIVITY_THRESHOLD = int(os.getenv("IDLE_INACTIVITY_THRESHOLD","120"))  # seconds idle before auto tick
 
+# -------- Idle Quest System (progress via ticks) --------
+class IdleQuest(BaseModel):
+    id: str
+    goal: str
+    required: int
+    progress: int
+    status: str  # active|completed
+    tags: list[str] | None = None
+    created_at: float
+    updated_at: float
+
+class IdleQuestList(BaseModel):
+    items: list[IdleQuest]
+
+_idle_tick_history: list[dict[str, Any]] = []  # ring buffer of recent ticks
+IDLE_TICK_HISTORY_LIMIT = 200
+
+def _ensure_idle_quests_seed(conn: sqlite3.Connection) -> None:
+    try:
+        cur = conn.execute("SELECT COUNT(*) FROM idle_quests")
+        if cur.fetchone()[0] == 0:
+            now = time.time()
+            seeds = [
+                ("q_ticks_3","Erreiche 3 Idle Ticks",3,0,"active",json.dumps(["idle","starter"]),now,now),
+                ("q_ticks_5","Erreiche 5 Idle Ticks",5,0,"active",json.dumps(["idle","starter"]),now,now),
+            ]
+            conn.executemany("INSERT INTO idle_quests(id,goal,required,progress,status,tags,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)", seeds)
+            conn.commit()
+    except Exception:
+        pass
+
+def _list_idle_quests(conn: sqlite3.Connection) -> list[IdleQuest]:
+    items: list[IdleQuest] = []
+    try:
+        cur = conn.execute("SELECT id,goal,required,progress,status,tags,created_at,updated_at FROM idle_quests ORDER BY created_at ASC")
+        for row in cur.fetchall():
+            qid, goal, req, prog, status, tags_json, ca, ua = row
+            tags: list[str] | None = None
+            if tags_json:
+                try:
+                    tj = json.loads(tags_json)
+                    if isinstance(tj, list):
+                        tags = [str(t) for t in tj]
+                except Exception:
+                    tags = None
+            items.append(IdleQuest(id=qid, goal=goal, required=int(req), progress=int(prog), status=status, tags=tags, created_at=ca, updated_at=ua))
+    except Exception:
+        pass
+    return items
+
+def _update_idle_quest_progress(delta: int = 1) -> list[dict[str, Any]]:
+    """Increment progress for all active quests; return list of progress change events."""
+    changes: list[dict[str, Any]] = []
+    if not db_conn:
+        return changes
+    try:
+        cur = db_conn.execute("SELECT id,progress,required FROM idle_quests WHERE status='active'")
+        rows = cur.fetchall()
+        now = time.time()
+        for qid, prog, req in rows:
+            new_prog = prog + delta
+            status = 'active'
+            completed = False
+            if new_prog >= req:
+                new_prog = req
+                status = 'completed'
+                completed = True
+            db_conn.execute("UPDATE idle_quests SET progress=?, status=?, updated_at=? WHERE id=?", (new_prog, status, now, qid))
+            changes.append({"id": qid, "progress": new_prog, "required": req, "completed": completed})
+        db_conn.commit()
+    except Exception:
+        pass
+    return changes
+
 async def _idle_background_loop():
     while True:
         try:
@@ -1800,7 +2220,17 @@ async def _idle_background_loop():
                 try:
                     idle_state["tick"] += 1
                     idle_state["resources"] += 1
-                    await emit_event("idle.tick.auto", {"tick": idle_state["tick"], "resources": idle_state["resources"], "auto": True})
+                    changes = _update_idle_quest_progress(1)
+                    payload = {"tick": idle_state["tick"], "resources": idle_state["resources"], "auto": True, "quests": changes}
+                    _idle_tick_history.append({"ts": time.time(), **payload})
+                    if len(_idle_tick_history) > IDLE_TICK_HISTORY_LIMIT:
+                        del _idle_tick_history[0:len(_idle_tick_history)-IDLE_TICK_HISTORY_LIMIT]
+                    await emit_event("idle.tick.auto", payload)
+                    # emit quest events
+                    for ch in changes:
+                        await emit_event("idle.quest.progress", ch)
+                        if ch.get("completed"):
+                            await emit_event("idle.quest.completed", {"id": ch["id"]})
                     # alle 2 Auto-Ticks eine sanfte Hinweis-Empfehlung
                     if idle_state["tick"] % 2 == 0:
                         await emit_event("idle.suggest", {"tip": "Optionen erneuern oder Plan prüfen?"})
@@ -1852,10 +2282,59 @@ async def idle_tick(agent: str = Depends(require_auth)) -> dict[str, Any]:
             "summary": "Increase passive gain",
             "patch_preview": "--- a/plugins/games/idle/rules.yaml\n+++ b/plugins/games/idle/rules.yaml\n@@\n-passive_gain: 1\n+passive_gain: 2\n",
         }
-    evt_payload: dict[str, Any] = {"tick": idle_state["tick"], "resources": idle_state["resources"], "proposal": bool(proposal)}
+    # progress quests
+    changes = _update_idle_quest_progress(1)
+    for ch in changes:
+        await emit_event("idle.quest.progress", ch)
+        if ch.get("completed"):
+            await emit_event("idle.quest.completed", {"id": ch["id"]})
+    evt_payload: dict[str, Any] = {"tick": idle_state["tick"], "resources": idle_state["resources"], "proposal": bool(proposal), "quests": changes}
     IDLE_TICKS_TOTAL.inc()
+    _idle_tick_history.append({"ts": time.time(), **evt_payload})
+    if len(_idle_tick_history) > IDLE_TICK_HISTORY_LIMIT:
+        del _idle_tick_history[0:len(_idle_tick_history)-IDLE_TICK_HISTORY_LIMIT]
     await emit_event("idle.tick", evt_payload)
     return {"state": idle_state, "gained": gained, "proposal": proposal}
+
+@app.get("/game/idle/quests", response_model=IdleQuestList)
+async def idle_quests(agent: str = Depends(require_auth)) -> IdleQuestList:  # type: ignore[override]
+    rate_limit(agent)
+    _ensure_db()
+    _ensure_idle_quests_seed(db_conn)  # type: ignore[arg-type]
+    items = _list_idle_quests(db_conn)  # type: ignore[arg-type]
+    return IdleQuestList(items=items)
+
+class IdleQuestCreateRequest(BaseModel):
+    goal: str
+    required: int = 5
+    tags: list[str] | None = None
+
+@app.post("/game/idle/quests", response_model=IdleQuest)
+async def idle_quest_create(req: IdleQuestCreateRequest, agent: str = Depends(require_auth)) -> IdleQuest:  # type: ignore[override]
+    rate_limit(agent)
+    _ensure_db()
+    if not db_conn:
+        raise HTTPException(status_code=500, detail={"error":{"code":"db_unavailable"}})
+    _ensure_idle_quests_seed(db_conn)  # type: ignore[arg-type]
+    now = time.time()
+    qid = f"q_{int(now)}_{random.randint(100,999)}"
+    try:
+        db_conn.execute(
+            "INSERT INTO idle_quests(id,goal,required,progress,status,tags,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            (qid, req.goal[:200], int(req.required), 0, 'active', json.dumps(req.tags or []), now, now)
+        )
+        db_conn.commit()
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail={"error":{"code":"quest_insert_failed","message":str(e)}})
+    quest = IdleQuest(id=qid, goal=req.goal[:200], required=int(req.required), progress=0, status='active', tags=req.tags or [], created_at=now, updated_at=now)
+    await emit_event("idle.quest.create", quest.model_dump())
+    return quest
+
+@app.get("/game/idle/log")
+async def idle_log(limit: int = 10, agent: str = Depends(require_auth)) -> dict[str, Any]:  # type: ignore[override]
+    rate_limit(agent)
+    lim = max(1, min(200, limit))
+    return {"items": list(_idle_tick_history)[-lim:][::-1], "total": len(_idle_tick_history)}
 
 # ---------------- Environment & Suggestions -----------------
 SAFE_ENV_KEYS = {"APP_VERSION","KILL_SWITCH","PUBLIC_SERVER_URL"}
@@ -2344,10 +2823,13 @@ async def _thought_loop():
             logger.warning("thought loop error: %s", e)
         await asyncio.sleep(random.uniform(THOUGHT_INTERVAL_MIN, THOUGHT_INTERVAL_MAX))
 @app.get("/thought/stream", response_model=ThoughtStreamResponse)
-async def thought_stream(limit: int = 50, agent: str = Depends(require_auth)) -> ThoughtStreamResponse:  # type: ignore
+async def thought_stream(limit: int = 50, category: str | None = None, agent: str = Depends(require_auth)) -> ThoughtStreamResponse:  # type: ignore
     rate_limit(agent)
-    items = list(_recent_thoughts)[-limit:]
-    return ThoughtStreamResponse(items=items[::-1], total=len(_recent_thoughts))
+    items_full = list(_recent_thoughts)
+    if category:
+        items_full = [t for t in items_full if (t.category or "") == category]
+    items = items_full[-limit:]
+    return ThoughtStreamResponse(items=items[::-1], total=len(items_full))
 @app.post("/thought/generate", response_model=Thought)
 async def thought_generate(agent: str = Depends(require_auth)) -> Thought:  # type: ignore
     rate_limit(agent)
@@ -2364,6 +2846,25 @@ async def thought_generate(agent: str = Depends(require_auth)) -> Thought:  # ty
     THOUGHT_CATEGORY_TOTAL.labels(category=t.category or "unknown").inc()
     await emit_event("thought.stream", {"id": t.id, "text": t.text, "category": t.category, "manual": True})
     return t
+
+class ThoughtPinRequest(BaseModel):
+    pinned: bool
+
+@app.patch("/thought/{thought_id}/pin", response_model=Thought)
+async def thought_pin(thought_id: str, req: ThoughtPinRequest, agent: str = Depends(require_auth)) -> Thought:  # type: ignore
+    rate_limit(agent)
+    # locate in recent list
+    found: Thought | None = None
+    for t in _recent_thoughts:
+        if t.id == thought_id:
+            found = t
+            break
+    if not found:
+        raise HTTPException(status_code=404, detail={"error":{"code":"thought_not_found"}})
+    found.pinned = bool(req.pinned)
+    # emit event
+    await emit_event("pinned_insight", {"id": found.id, "pinned": found.pinned, "category": found.category})
+    return found
 
 # ---------- Global Error Handlers ----------
 @app.exception_handler(HTTPException)

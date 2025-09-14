@@ -1,0 +1,18 @@
+version: 1
+name: sandbox_fast_iteration
+allowed_dirs:
+  - experiments
+  - notebooks
+  - scratch
+llm:
+  model: llama-3.3-8b-instant
+  temperature: 0.5
+  max_tokens: 400
+rules:
+  - id: allow_experimental
+    description: Erlaubt experimentelle Commits ohne Review.
+    action: allow
+  - id: block_sensitive
+    description: Blockiert versehentliche Credentials.
+    match: '(?i)(password|secret|token)'
+    action: deny
