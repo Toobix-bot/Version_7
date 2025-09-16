@@ -15,6 +15,7 @@ from typing import Any, AsyncGenerator, Dict, Callable, Awaitable, TypeVar, Coro
 from .routes import wizard as wizard_routes  # Phase1: extracted wizard route
 from .routes import help as help_routes
 from .routes import advisor as advisor_routes
+from .routes import templates as templates_routes
 
 from fastapi import FastAPI, Depends, HTTPException, status, Request, Header, Body, Query
 from fastapi.openapi.utils import get_openapi
@@ -238,6 +239,7 @@ app.add_middleware(RequestContextMiddleware)
 app.include_router(wizard_routes.router, dependencies=[Depends(require_auth)])
 app.include_router(help_routes.router, dependencies=[Depends(require_auth)])
 app.include_router(advisor_routes.router, dependencies=[Depends(require_auth)])
+app.include_router(templates_routes.router, dependencies=[Depends(require_auth)])
 
 # -------- Simple Rate Limiter --------
 RATE_LIMIT_RPS = 5
@@ -1442,8 +1444,9 @@ section{margin-bottom:18px;padding:12px;background:#1b1f27;border:1px solid #2c3
 h2{margin:4px 0 12px;font-size:18px}
 button{background:#2563eb;color:#fff;border:0;padding:6px 12px;margin:4px 4px 4px 0;border-radius:4px;cursor:pointer;font-size:13px}
 button.secondary{background:#374151}
-code{font-size:12px;background:#111722;padding:2px 4px;border-radius:4px}
+code{font-size:12px;background:#111722;padding:2px 4px;border-radius:4px;white-space:pre-wrap;word-break:break-word}
 .opts button{display:block;width:100%;text-align:left;position:relative}
+.opts button{white-space:normal;word-break:break-word;overflow-wrap:anywhere}
 .opts button.levelup{border:1px solid #f59e0b;background:#92400e}
 .opts button .risk{position:absolute;right:6px;top:6px;font-size:10px;padding:2px 5px;border-radius:10px;background:#374151;color:#fff;opacity:.85}
 .opts button .risk.r0{background:#059669}
@@ -1453,7 +1456,7 @@ code{font-size:12px;background:#111722;padding:2px 4px;border-radius:4px}
 .badge{display:inline-block;margin-left:6px;padding:1px 4px;font-size:10px;border-radius:4px;background:#1f2937;color:#fff}
 .badge.level{background:#f59e0b;color:#000}
 .badge.insp{background:#ec4899}
-.log-item{margin:0 0 4px;line-height:1.25}
+.log-item{margin:0 0 4px;line-height:1.25;word-break:break-word;overflow-wrap:anywhere}
 .kind-action{color:#10b981}.kind-tick{color:#9ca3af}.kind-arc_shift{color:#f59e0b}
 .flex{display:flex;gap:16px;flex-wrap:wrap}
 .col{flex:1 1 300px;min-width:280px}
@@ -1469,8 +1472,10 @@ input[type=text]{width:100%;padding:6px;background:#111722;color:#fff;border:1px
 .res[data-k="stabilitaet"] .bar span{background:linear-gradient(90deg,#10b981,#34d399)}
 .res[data-k="erfahrung"] .bar span{background:linear-gradient(90deg,#9333ea,#a855f7)}
 .res[data-k="level"] .bar span{background:linear-gradient(90deg,#ef4444,#f87171)}
+/* safer text wrapping across panels incl. help overlay */
+#stateBox,#logBox,#companionsBox,#buffsBox,#skillsBox,#helpOverlay,#helpOverlay *{word-break:break-word;overflow-wrap:anywhere}
 </style></head><body>
-<h1>Story <small id=sseStatus style='font-size:12px;color:#888'>[SSE: init]</small></h1>
+<h1>Story <small id=sseStatus style='font-size:12px;color:#888'>[SSE: init]</small> <small id=keyStatus style='font-size:12px;color:#888;margin-left:8px'>[Key: ?]</small></h1>
 <div id="helpOverlay" style="position:fixed;right:16px;bottom:16px;z-index:9999;background:#111827;border:1px solid #374151;padding:12px 14px;width:300px;max-height:60vh;overflow:auto;border-radius:10px;box-shadow:0 4px 18px -2px #0009;font-size:12px;display:none">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
         <strong style="font-size:13px">Hilfe & Kontext</strong>
@@ -1515,6 +1520,8 @@ const apiKey = localStorage.getItem('api_key') || prompt('API Key?'); if(apiKey)
 const H = {'X-API-Key': apiKey};
 function j(el, html){document.getElementById(el).innerHTML=html}
 function fetchJSON(p,opt={}){opt.headers={...(opt.headers||{}),...H,'Content-Type':'application/json'};return fetch(p,opt).then(r=>{if(!r.ok) throw new Error(r.status); return r.json()})}
+function setKeyStatus(txt,color){ const el=document.getElementById('keyStatus'); if(el){ el.textContent='[Key: '+txt+']'; el.style.color=color||'#888'; } }
+async function checkAuth(){ try{ const r = await fetchJSON('/health/dev'); const mode = (r && r.auth_mode) ? r.auth_mode : 'ok'; setKeyStatus(mode,'#10b981'); } catch(e){ setKeyStatus('invalid','#ef4444'); } }
 function fmtResBlocks(r){const maxMap={energie:100,wissen:200,inspiration:100,ruf:100,stabilitaet:100,erfahrung:1000,level:20};return '<div class="res-list">'+Object.entries(r).map(([k,v])=>{const max=maxMap[k]||100;const pct=Math.min(100,Math.round((v/max)*100));return `<div class='res' data-k='${k}'><div><b>${k}</b> <span style='float:right'>${v}</span></div><div class='bar'><span style='width:${pct}%'></span></div></div>`}).join('')+'</div>'}
 function renderCompanions(list){const box=document.getElementById('companionsBox'); if(!list||!list.length){box.textContent='(keine)';return;} box.innerHTML=list.map(c=>`<div><b>${c.name}</b> <small>${c.archetype||''}</small> – ${c.mood||''} ${c.stats?'<code>'+Object.entries(c.stats).map(([k,v])=>k+':'+v).join(', ')+'</code>':''}</div>`).join('')}
 function renderBuffs(list){const now=Date.now()/1000;const box=document.getElementById('buffsBox'); if(!list||!list.length){box.textContent='(keine)';return;} box.innerHTML=list.map(b=>{const rem=b.expires_at?Math.max(0,Math.round(b.expires_at-now)):null; return `<div><b>${b.label}</b> <small>${b.kind||''}</small> ${b.magnitude!=null?('['+b.magnitude+']'):''} ${rem!=null?(' <span style=color:#f59e0b>'+rem+'s</span>'):''}</div>`}).join('')}
@@ -1528,7 +1535,7 @@ function advance(){fetchJSON('/story/advance',{method:'POST'}).then(e=>{loadStat
 function regen(){fetchJSON('/story/options/regen',{method:'POST'}).then(_=>loadState())}
 function prependLog(ev){const box=document.getElementById('logBox'); const div=document.createElement('div');div.className='log-item kind-'+ev.kind; div.innerHTML=`[${ev.epoch}] <span>${ev.kind}</span>: ${ev.text}`; box.prepend(div)}
 document.getElementById('btnFree').onclick=free; document.getElementById('btnAdvance').onclick=advance; document.getElementById('btnRegen').onclick=regen;
-loadState(); loadLog();
+loadState(); loadLog(); checkAuth();
 // Help Overlay Logic
 const helpToggle=document.getElementById('helpToggle');
 const helpOverlay=document.getElementById('helpOverlay');
