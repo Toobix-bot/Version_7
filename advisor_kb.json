@@ -1,0 +1,25 @@
+{
+  "entries": [
+    {
+      "id": "story-basics",
+      "topic": "story",
+      "text": "Story: Lade zuerst /story/state, dann wähle eine Option via /story/choose. Entscheidungen treiben die Erzählung voran.",
+      "answer": "Nutze /story/state um Zustand & Optionen zu sehen. Wähle danach mit /story/choose eine Option, um die Story fortzusetzen.",
+      "source": "docs/STORY.md"
+    },
+    {
+      "id": "idle-quests",
+      "topic": "idle",
+      "text": "Idle: Fortschritt über Quests und Auto‑Ticks. Nutze /game/idle/state und /game/idle/tick.",
+      "answer": "Starte mit /game/idle/state. Verwende /game/idle/tick für manuelle Fortschritte; Auto‑Ticks können im Hintergrund laufen.",
+      "source": "docs/IDLE.md"
+    },
+    {
+      "id": "policy-wizard",
+      "topic": "policy",
+      "text": "Policy Wizard: POST /policy/wizard mit template, risk_profile, overrides, annotate.",
+      "answer": "Sende an /policy/wizard z.B. {\"template\":\"solo_dev\", \"risk_profile\":\"low\"}. Das Ergebnis enthält policy, diff und notes.",
+      "source": "docs/USAGE_EXAMPLES.md"
+    }
+  ]
+}

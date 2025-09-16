@@ -13,6 +13,8 @@ from logging.handlers import RotatingFileHandler
 from functools import wraps
 from typing import Any, AsyncGenerator, Dict, Callable, Awaitable, TypeVar, Coroutine, cast
 from .routes import wizard as wizard_routes  # Phase1: extracted wizard route
+from .routes import help as help_routes
+from .routes import advisor as advisor_routes
 
 from fastapi import FastAPI, Depends, HTTPException, status, Request, Header, Body, Query
 from fastapi.openapi.utils import get_openapi
@@ -233,7 +235,9 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         return response
 
 app.add_middleware(RequestContextMiddleware)
-app.include_router(wizard_routes.router)
+app.include_router(wizard_routes.router, dependencies=[Depends(require_auth)])
+app.include_router(help_routes.router, dependencies=[Depends(require_auth)])
+app.include_router(advisor_routes.router, dependencies=[Depends(require_auth)])
 
 # -------- Simple Rate Limiter --------
 RATE_LIMIT_RPS = 5
