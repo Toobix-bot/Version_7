@@ -6,12 +6,15 @@ from __future__ import annotations
 
 import os
 from typing import Any
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 def _template_dir() -> str:
     policy_dir = os.getenv("POLICY_DIR", "policies")
     return os.path.join(policy_dir, "templates")
+
+
+ALLOWED_TEMPLATE_SUFFIXES = (".yaml", ".yml")
 
 
 router = APIRouter()
@@ -34,7 +37,7 @@ async def list_policy_templates() -> TemplatesList:
     items: list[TemplateInfo] = []
     try:
         for fname in sorted(os.listdir(TEMPLATE_DIR)):
-            if not (fname.endswith(".yaml") or fname.endswith(".yml")):
+            if not fname.endswith(ALLOWED_TEMPLATE_SUFFIXES):
                 continue
             pth = os.path.join(TEMPLATE_DIR, fname)
             try:
@@ -55,18 +58,27 @@ class TemplateRead(BaseModel):
     content: str
 
 
+def _validate_template_name(name: str) -> None:
+    if "/" in name or ".." in name or "\\" in name:
+        raise HTTPException(status_code=400, detail="invalid_template_name")
+    if not name.endswith(ALLOWED_TEMPLATE_SUFFIXES):
+        raise HTTPException(status_code=422, detail="template_extension_not_allowed")
+
+
+def _resolve_template_path(name: str) -> str:
+    _validate_template_name(name)
+    template_dir = _template_dir()
+    os.makedirs(template_dir, exist_ok=True)
+    path = os.path.join(template_dir, name)
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="template_not_found")
+    return path
+
+
 @router.get("/policy/templates/{name}", response_model=TemplateRead)
 async def read_policy_template(name: str) -> TemplateRead:
     # basic sanitization: disallow path traversal and only .yml/.yaml
-    if "/" in name or ".." in name or "\\" in name:
-        raise ValueError("invalid_template_name")
-    if not (name.endswith(".yaml") or name.endswith(".yml")):
-        raise FileNotFoundError("template_extension_not_allowed")
-    TEMPLATE_DIR = _template_dir()
-    os.makedirs(TEMPLATE_DIR, exist_ok=True)
-    pth = os.path.join(TEMPLATE_DIR, name)
-    if not os.path.isfile(pth):
-        raise FileNotFoundError("template_not_found")
+    pth = _resolve_template_path(name)
     st = os.stat(pth)
     with open(pth, "r", encoding="utf-8") as f:
         content = f.read()
@@ -102,10 +114,7 @@ def _deep_merge(base: Any, overrides: Any) -> Any:
 async def render_from_template(req: RenderFromTemplateRequest) -> RenderFromTemplateResponse:
     import yaml
     # load template
-    TEMPLATE_DIR = _template_dir()
-    if "/" in req.name or ".." in req.name or "\\" in req.name:
-        raise ValueError("invalid_template_name")
-    pth = os.path.join(TEMPLATE_DIR, req.name)
+    pth = _resolve_template_path(req.name)
     with open(pth, "r", encoding="utf-8") as f:
         tpl = yaml.safe_load(f) or {}
     merged = _deep_merge(tpl, req.overrides or {})
@@ -132,12 +141,10 @@ class ApplyFromTemplateResponse(BaseModel):
 @router.post("/policy/apply-from-template", response_model=ApplyFromTemplateResponse)
 async def apply_from_template(req: ApplyFromTemplateRequest) -> ApplyFromTemplateResponse:
     import yaml
-    TEMPLATE_DIR = _template_dir()
-    if "/" in req.name or ".." in req.name or "\\" in req.name:
-        return ApplyFromTemplateResponse(status="error", message="invalid_template_name")
-    pth = os.path.join(TEMPLATE_DIR, req.name)
-    if not os.path.isfile(pth):
-        return ApplyFromTemplateResponse(status="error", message="template_not_found")
+    try:
+        pth = _resolve_template_path(req.name)
+    except HTTPException as exc:
+        return ApplyFromTemplateResponse(status="error", message=str(exc.detail))
     with open(pth, "r", encoding="utf-8") as f:
         tpl = yaml.safe_load(f) or {}
     merged = _deep_merge(tpl, req.overrides or {})
