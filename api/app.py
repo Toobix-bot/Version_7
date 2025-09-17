@@ -32,6 +32,7 @@ from policy.model import Policy
 from policy.opa_gate import opa_allow
 from fastapi.exceptions import RequestValidationError
 from starlette.responses import JSONResponse
+from api.core.infra import init_db as infra_init_db, get_db
 
 load_dotenv()
 # ---- Logging Setup ----
@@ -92,10 +93,13 @@ from contextlib import asynccontextmanager
 @asynccontextmanager
 async def _lifespan(app_: FastAPI):  # pragma: no cover - setup wiring
     # initialize DB + policies
+    global db_conn
     try:
-        init_db()
+        infra_init_db()
     except Exception:
         pass
+    finally:
+        db_conn = get_db()
     try:
         load_policies()
     except Exception:
@@ -290,11 +294,23 @@ except NameError:
 # lifespan events did not run (e.g., direct import in tests).
 def _ensure_db() -> None:
     global db_conn
-    if db_conn is None:
+    conn = get_db()
+    if conn is None:
         try:
-            init_db()
+            infra_init_db()
         except Exception as e:  # pragma: no cover - defensive
             raise RuntimeError(f"database_init_failed: {e}")
+        conn = get_db()
+        if conn is None:  # pragma: no cover - defensive
+            raise RuntimeError("database_init_failed: missing connection")
+    db_conn = conn
+
+
+def init_db() -> None:
+    """Initialize database via core infra and sync local connection handle."""
+    infra_init_db()
+    global db_conn
+    db_conn = get_db()
 
 REGISTRY = CollectorRegistry()
 ACTIONS_TOTAL = Counter("actions_total", "Count of observed actions", ["kind"], registry=REGISTRY)
@@ -1054,166 +1070,6 @@ async def story_meta_skills_create(req: SkillCreate, agent: str = Depends(requir
     await emit_event("story.meta.skill.add", skill.model_dump())
     await emit_event("story.state", {"meta":"skills"})
     return skill
-
-# ---------------- Database ----------------
-def init_db() -> None:
-    global db_conn
-    first = not os.path.exists(DB_PATH)
-    db_conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    db_conn.execute("PRAGMA journal_mode=WAL;")
-    # base schema
-    db_conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts REAL NOT NULL,
-            kind TEXT NOT NULL,
-            data TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS actions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts REAL NOT NULL,
-            agent_id TEXT NOT NULL,
-            action_type TEXT NOT NULL,
-            latency_ms REAL NOT NULL,
-            input_size INTEGER,
-            output_size INTEGER,
-            score REAL,
-            meta TEXT
-        );
-        CREATE TABLE IF NOT EXISTS proposals (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts REAL NOT NULL,
-            description TEXT NOT NULL,
-            artifact_path TEXT NOT NULL,
-            target_files TEXT,
-            meta TEXT
-        );
-        CREATE TABLE IF NOT EXISTS llm_usage (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts REAL NOT NULL,
-            model TEXT NOT NULL,
-            prompt_tokens INTEGER,
-            completion_tokens INTEGER,
-            total_tokens INTEGER,
-            latency_ms REAL,
-            meta TEXT
-        );
-        CREATE TABLE IF NOT EXISTS thoughts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts REAL NOT NULL,
-            text TEXT NOT NULL,
-            kind TEXT NOT NULL,
-            meta TEXT
-        );
-        -- Story / Narrative tables (MVP)
-        CREATE TABLE IF NOT EXISTS story_state (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            ts REAL NOT NULL,
-            epoch INTEGER NOT NULL,
-            mood TEXT NOT NULL,
-            arc TEXT NOT NULL,
-            resources TEXT NOT NULL -- JSON serialized resource map
-        );
-        CREATE TABLE IF NOT EXISTS story_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts REAL NOT NULL,
-            epoch INTEGER NOT NULL,
-            kind TEXT NOT NULL,
-            text TEXT NOT NULL,
-            mood TEXT NOT NULL,
-            deltas TEXT, -- JSON map of resource deltas
-            tags TEXT,   -- JSON array
-            option_ref TEXT
-        );
-        CREATE TABLE IF NOT EXISTS story_options (
-            id TEXT PRIMARY KEY,
-            created_at REAL NOT NULL,
-            label TEXT NOT NULL,
-            rationale TEXT,
-            risk INTEGER NOT NULL,
-            expected TEXT, -- JSON map expected resource delta
-            tags TEXT, -- JSON array
-            expires_at REAL
-        );
-        CREATE TABLE IF NOT EXISTS story_companions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            archetype TEXT,
-            mood TEXT,
-            stats TEXT, -- JSON
-            acquired_at REAL NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS story_buffs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            label TEXT NOT NULL,
-            kind TEXT,
-            magnitude INTEGER,
-            expires_at REAL,
-            meta TEXT
-        );
-        CREATE TABLE IF NOT EXISTS story_skills (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            level INTEGER NOT NULL,
-            xp INTEGER NOT NULL,
-            category TEXT,
-            updated_at REAL NOT NULL
-        );
-        -- Idle Quests table (progress tracking for idle game layer)
-        CREATE TABLE IF NOT EXISTS idle_quests (
-            id INTEGER PRIMARY KEY,
-            goal TEXT NOT NULL,
-            required INTEGER NOT NULL,
-            progress INTEGER NOT NULL DEFAULT 0,
-            status TEXT NOT NULL,
-            tags TEXT, -- JSON array of string tags
-            created_at REAL NOT NULL,
-            updated_at REAL NOT NULL
-        );
-        """
-    )
-    db_conn.commit()
-    # seed meta resources if empty
-    try:
-        cur = db_conn.execute("SELECT COUNT(*) FROM story_companions")
-        if cur.fetchone()[0] == 0:
-            now = time.time()
-            companion_sets = [
-                [
-                    ("Mentor", "weise", "ruhig", {"bonus_wissen":5,"empatie":3}),
-                    ("Späher", "wendig", "wachsam", {"sicht":7,"tempo":2}),
-                ],
-                [
-                    ("Alte KI", "analytisch", "neutral", {"analyse":8,"latenz":1}),
-                    ("Muse", "kreativ", "inspirierend", {"inspiration":10}),
-                ],
-                [
-                    ("Wächter", "defensiv", "fokussiert", {"schutz":6,"standhaft":4}),
-                ],
-            ]
-            # choose first set for initial seed; others available for future expansion endpoints
-            for name, archetype, mood, stats in companion_sets[0]:
-                db_conn.execute("INSERT INTO story_companions(name,archetype,mood,stats,acquired_at) VALUES (?,?,?,?,?)", (name, archetype, mood, json.dumps(stats), now))
-        cur = db_conn.execute("SELECT COUNT(*) FROM story_skills")
-        if cur.fetchone()[0] == 0:
-            skill_sets = [
-                [ ("fokus",1,0,"mental"), ("reflexion",1,0,"meta"), ("ideenfindung",1,0,"kreativ") ],
-                [ ("analyse",1,0,"wissen"), ("exploration",1,0,"pfad"), ("konzentration",1,0,"mental") ],
-            ]
-            for name,lvl,xp,cat in skill_sets[0]:
-                db_conn.execute("INSERT INTO story_skills(name,level,xp,category,updated_at) VALUES (?,?,?,?,?)", (name,lvl,xp,cat,time.time()))
-        cur = db_conn.execute("SELECT COUNT(*) FROM story_buffs")
-        if cur.fetchone()[0] == 0:
-            buff_sets = [
-                [ ("klarheit","geist",5, now + 3600, {"beschreibung":"Gedanken sind geordnet"}), ("flow","tempo",3, now + 900, {"beschreibung":"Erhöhte kreative Durchsatzrate"}) ],
-                [ ("ruhe","regeneration",2, now + 1200, {"beschreibung":"Langsame Erholung"}) ]
-            ]
-            for label,kind,mag,exp,meta in buff_sets[0]:
-                db_conn.execute("INSERT INTO story_buffs(label,kind,magnitude,expires_at,meta) VALUES (?,?,?,?,?)", (label,kind,mag,exp,json.dumps(meta)))
-        db_conn.commit()
-    except Exception:
-        pass
 
 current_policy: Policy | None = None
 # modify load_policies to use schema
