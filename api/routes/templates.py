@@ -5,7 +5,7 @@ Provides a minimal GET endpoint to enumerate YAML templates under policies/templ
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, cast
 from fastapi import APIRouter
 from pydantic import BaseModel
 
@@ -73,87 +73,79 @@ async def read_policy_template(name: str) -> TemplateRead:
     return TemplateRead(name=name, path=pth, size=int(st.st_size), content=content)
 
 
-# ---------- Render / Apply from Template ----------
+# -------- Render / Apply from template --------
 
-class RenderFromTemplateRequest(BaseModel):
+class TemplateRenderRequest(BaseModel):
     name: str
     overrides: dict[str, Any] | None = None
 
 
-class RenderFromTemplateResponse(BaseModel):
+class TemplateRenderResponse(BaseModel):
     status: str
+    name: str
     content: str
     policy: dict[str, Any]
 
 
-def _deep_merge(base: Any, overrides: Any) -> Any:
-    if isinstance(base, dict) and isinstance(overrides, dict):
-        out = dict(base)
-        for k, v in overrides.items():
-            if k in out:
-                out[k] = _deep_merge(out[k], v)
-            else:
-                out[k] = v
-        return out
-    return overrides if overrides is not None else base
+def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    out = dict(base)
+    for k, v in (patch or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)  # type: ignore[arg-type]
+        else:
+            out[k] = v
+    return out
 
 
-@router.post("/policy/render-from-template", response_model=RenderFromTemplateResponse)
-async def render_from_template(req: RenderFromTemplateRequest) -> RenderFromTemplateResponse:
-    import yaml
-    # load template
-    TEMPLATE_DIR = _template_dir()
-    if "/" in req.name or ".." in req.name or "\\" in req.name:
-        raise ValueError("invalid_template_name")
-    pth = os.path.join(TEMPLATE_DIR, req.name)
-    with open(pth, "r", encoding="utf-8") as f:
-        tpl = yaml.safe_load(f) or {}
-    merged = _deep_merge(tpl, req.overrides or {})
-    # validate
-    from policy.model import Policy as _Pol
-    new_pol = _Pol.model_validate(merged)
-    content = yaml.safe_dump(merged, sort_keys=False, allow_unicode=True)
-    return RenderFromTemplateResponse(status="ok", content=content, policy=new_pol.model_dump())
+@router.post("/policy/render-from-template", response_model=TemplateRenderResponse)
+async def render_from_template(req: TemplateRenderRequest) -> TemplateRenderResponse:
+    import yaml  # lazy import
+    # read template
+    tpl = await read_policy_template(req.name)
+    raw: Any = yaml.safe_load(tpl.content)
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ValueError("template_not_object")
+    base = cast(dict[str, Any], raw)
+    merged = _deep_merge(base, req.overrides or {})
+    # validate policy
+    from policy.model import Policy as _Pol  # type: ignore
+    try:
+        pol = _Pol.model_validate(merged)
+    except Exception as e:  # noqa: BLE001
+        # bubble up as 422 by re-raising; FastAPI will format
+        raise e
+    content = yaml.safe_dump(pol.model_dump(), sort_keys=False, allow_unicode=True)
+    return TemplateRenderResponse(status="ok", name=req.name, content=content, policy=pol.model_dump())
 
 
-class ApplyFromTemplateRequest(BaseModel):
-    name: str
-    overrides: dict[str, Any] | None = None
-    dry_run: bool | None = True
+class TemplateApplyRequest(TemplateRenderRequest):
+    dry_run: bool | None = False
 
 
-class ApplyFromTemplateResponse(BaseModel):
+class TemplateApplyResponse(BaseModel):
     status: str
     path: str | None = None
-    policy: dict[str, Any] | None = None
-    message: str | None = None
+    name: str
+    dry_run: bool | None = None
+    policy: dict[str, Any]
+    content: str
 
 
-@router.post("/policy/apply-from-template", response_model=ApplyFromTemplateResponse)
-async def apply_from_template(req: ApplyFromTemplateRequest) -> ApplyFromTemplateResponse:
-    import yaml
-    TEMPLATE_DIR = _template_dir()
-    if "/" in req.name or ".." in req.name or "\\" in req.name:
-        return ApplyFromTemplateResponse(status="error", message="invalid_template_name")
-    pth = os.path.join(TEMPLATE_DIR, req.name)
-    if not os.path.isfile(pth):
-        return ApplyFromTemplateResponse(status="error", message="template_not_found")
-    with open(pth, "r", encoding="utf-8") as f:
-        tpl = yaml.safe_load(f) or {}
-    merged = _deep_merge(tpl, req.overrides or {})
-    # validate
-    from policy.model import Policy as _Pol
-    try:
-        new_pol = _Pol.model_validate(merged)
-    except Exception as e:  # noqa: BLE001
-        return ApplyFromTemplateResponse(status="invalid", message=str(e))
-    content = yaml.safe_dump(merged, sort_keys=False, allow_unicode=True)
+@router.post("/policy/apply-from-template", response_model=TemplateApplyResponse)
+async def apply_from_template(req: TemplateApplyRequest) -> TemplateApplyResponse:
+    # reuse render
+    rendered = await render_from_template(TemplateRenderRequest(name=req.name, overrides=req.overrides))
     if req.dry_run:
-        return ApplyFromTemplateResponse(status="validated", policy=new_pol.model_dump())
+        return TemplateApplyResponse(status="validated", path=None, name=req.name, dry_run=True, policy=rendered.policy, content=rendered.content)
     # persist to POLICY_DIR/policy.yaml
     policy_dir = os.getenv("POLICY_DIR", "policies")
     os.makedirs(policy_dir, exist_ok=True)
-    target = os.path.join(policy_dir, "policy.yaml")
-    with open(target, "w", encoding="utf-8") as f:
-        f.write(content if content.endswith("\n") else content + "\n")
-    return ApplyFromTemplateResponse(status="applied", path=target, policy=new_pol.model_dump())
+    target_path = os.path.join(policy_dir, "policy.yaml")
+    with open(target_path, "w", encoding="utf-8") as f:
+        f.write(rendered.content if rendered.content.endswith("\n") else rendered.content + "\n")
+    return TemplateApplyResponse(status="applied", path=target_path, name=req.name, dry_run=False, policy=rendered.policy, content=rendered.content)
+
+
+# Note: Removed older duplicate implementations of render/apply endpoints to avoid route conflicts.
