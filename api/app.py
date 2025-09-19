@@ -2016,7 +2016,7 @@ input[type=text]{width:100%;padding:6px;background:#111722;color:#fff;border:1px
 /* ensure general panel content doesn't overflow */
 section, section * { word-break: break-word; overflow-wrap: anywhere }
 </style></head><body>
-<h1>Story
+<h1>Story <small style='font-size:12px;color:#9ca3af;margin-left:6px'>Neue UI • Beta</small>
     <small id=sseStatus style='font-size:12px;color:#888'>[SSE: init]</small>
     <small id=keyStatus style='font-size:12px;color:#888;margin-left:8px'>[Key: ?]</small>
     <small id=metaStatus style='font-size:12px;color:#888;margin-left:8px'>[meta: ?]</small>
@@ -2026,11 +2026,11 @@ section, section * { word-break: break-word; overflow-wrap: anywhere }
 </h1>
 <div id="topNav" style="display:flex;justify-content:space-between;align-items:center;margin:8px 0 12px 0;gap:12px;flex-wrap:wrap">
     <div>
-        <button id="navBtnDashboard" class="secondary">Dashboard</button>
-        <button id="navBtnStory" class="secondary">Story</button>
-    <button id="navBtnSuggestions" class="secondary">Suggestions</button>
-    <button id="navBtnPlanPR" class="secondary">Plan → PR</button>
-    <button id="navBtnPolicies" class="secondary">Policies</button>
+        <button id="navBtnDashboard" class="secondary" title="Zur Übersicht mit Badges, Health und letzten Ereignissen" aria-label="Übersicht öffnen">Dashboard</button>
+        <button id="navBtnStory" class="secondary" title="Story-Ansicht: Zustand, Optionen und Log" aria-label="Story öffnen">Story</button>
+    <button id="navBtnSuggestions" class="secondary" title="Vorschläge anzeigen, filtern und prüfen" aria-label="Vorschläge öffnen">Suggestions</button>
+    <button id="navBtnPlanPR" class="secondary" title="Plan erstellen, Branch erzeugen und optional PR (Rolle: Fortgeschritten/Pro, Git-Repo notwendig)" aria-label="Plan nach PR öffnen">Plan → PR</button>
+    <button id="navBtnPolicies" class="secondary" title="Policies laden, validieren (Dry-Run) und anwenden" aria-label="Policies öffnen">Policies</button>
     </div>
     <div style="font-size:12px;color:var(--muted)">
         <span id="navSSE" class="badge">SSE: ?</span>
@@ -2051,13 +2051,13 @@ section, section * { word-break: break-word; overflow-wrap: anywhere }
             </label>
         </div>
         <div>
-            <button id="btnLogin">Login</button>
-            <button id="btnRegister" class="secondary">Registrieren</button>
+            <button id="btnLogin" title="Mit E-Mail und Passwort anmelden" aria-label="Login">Login</button>
+            <button id="btnRegister" class="secondary" title="Neuen Account anlegen" aria-label="Registrieren">Registrieren</button>
         </div>
     </div>
     <div id="userBox" style="display:none;gap:8px;align-items:center">
-        <span id="userInfo" style="font-size:12px;color:#9ca3af"></span>
-        <button id="btnLogout" class="secondary">Logout</button>
+    <span id="userInfo" style="font-size:12px;color:#9ca3af"></span>
+    <button id="btnLogout" class="secondary" title="Abmelden" aria-label="Logout">Logout</button>
     </div>
     <div id="viewSettings" style="display:none;border-left:1px solid var(--border);padding-left:12px">
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
@@ -2089,15 +2089,15 @@ section, section * { word-break: break-word; overflow-wrap: anywhere }
                 </select>
             </label>
             <label style="font-size:12px"><input type="checkbox" id="setPublic" /> Öffentlich</label>
-            <button id="btnSaveView" class="secondary">Speichern</button>
+            <button id="btnSaveView" class="secondary" title="Anzeige-Einstellungen speichern" aria-label="Ansicht speichern">Speichern</button>
             <small id="viewInfo" style="color:#9ca3af"></small>
         </div>
         <div style="margin-top:8px;display:flex;gap:12px;flex-wrap:wrap;align-items:center">
             <strong style="font-size:12px;color:var(--muted)">Farben</strong>
-            <label style="font-size:12px">Primär <input id="huePrimary" type="range" min="0" max="360" step="1" value="210"></label>
-            <label style="font-size:12px">Sekundär <input id="hueSecondary" type="range" min="0" max="360" step="1" value="330"></label>
-            <label style="font-size:12px"><input id="hueRotate" type="checkbox"> Drehen</label>
-            <button id="btnApplyPalette" class="secondary">Farben anwenden</button>
+            <label style="font-size:12px">Primär <input id="huePrimary" type="range" min="0" max="360" step="1" value="210" title="Primärfarbe (Hue)" aria-label="Primärfarbe"></label>
+            <label style="font-size:12px">Sekundär <input id="hueSecondary" type="range" min="0" max="360" step="1" value="330" title="Sekundärfarbe (Hue)" aria-label="Sekundärfarbe"></label>
+            <label style="font-size:12px"><input id="hueRotate" type="checkbox" title="Primärfarbe langsam drehen" aria-label="Hue Rotation"> Drehen</label>
+            <button id="btnApplyPalette" class="secondary" title="Designfarben anwenden" aria-label="Farben anwenden">Farben anwenden</button>
         </div>
     </div>
 </section>
@@ -2127,8 +2127,8 @@ section, section * { word-break: break-word; overflow-wrap: anywhere }
         <label style="font-size:12px;display:block">Ziel
             <input id="sugGoal" type="text" placeholder="z. B. UI vereinfachen" style="min-width:260px" />
         </label>
-        <button id="sugGenerate">Generieren</button>
-        <button id="sugRefresh" class="secondary">Aktualisieren</button>
+    <button id="sugGenerate" title="Neuen Vorschlag basierend auf dem Ziel erzeugen" aria-label="Vorschlag generieren">Generieren</button>
+    <button id="sugRefresh" class="secondary" title="Liste neu laden" aria-label="Liste aktualisieren">Aktualisieren</button>
         <small id="sugInfo" style="color:#9ca3af"></small>
     </div>
     <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin:6px 0 10px">
@@ -2153,8 +2153,8 @@ section, section * { word-break: break-word; overflow-wrap: anywhere }
     <div id="sugListPane" style="display:grid;gap:8px"></div>
     <div id="sugDetail" style="margin-top:10px;font-size:13px;color:var(--muted)"></div>
     <div id="sugActions" style="display:none;margin-top:8px">
-        <button id="sugApprove">Übernehmen</button>
-        <button id="sugReject" class="secondary">Ablehnen</button>
+    <button id="sugApprove" title="Vorschlag übernehmen (Impact wird berechnet)" aria-label="Vorschlag übernehmen">Übernehmen</button>
+    <button id="sugReject" class="secondary" title="Vorschlag ablehnen (erstellt Revision)" aria-label="Vorschlag ablehnen">Ablehnen</button>
     </div>
 </section>
 <section id="panePlanPR" style="display:none">
@@ -2172,7 +2172,7 @@ section, section * { word-break: break-word; overflow-wrap: anywhere }
             </label>
             <label style="font-size:12px"><input type="checkbox" id="prDry" checked /> Dry-Run</label>
             <label style="font-size:12px"><input type="checkbox" id="prDraft" checked /> Draft-PR</label>
-            <button id="btnPlanPR">PR erstellen</button>
+            <button id="btnPlanPR" title="Plan erstellen, Branch anlegen und optional Draft-PR (Git & Rolle nötig)" aria-label="PR erstellen">PR erstellen</button>
         </div>
         <div style="margin-top:6px;display:flex;gap:8px;align-items:center">
             <input id="prLabels" placeholder="Labels (kommagetrennt)" style="flex:1" />
@@ -2186,9 +2186,9 @@ section, section * { word-break: break-word; overflow-wrap: anywhere }
 <section id="panePolicies" style="display:none">
     <h2>Policies</h2>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
-        <button id="btnPolicyReload" class="secondary">Reload</button>
-        <button id="btnPolicyDryRun">Dry-Run anwenden</button>
-        <button id="btnPolicyApply">Apply</button>
+    <button id="btnPolicyReload" class="secondary" title="Policies neu laden" aria-label="Reload Policies">Reload</button>
+    <button id="btnPolicyDryRun" title="YAML validieren (ohne zu speichern)" aria-label="Dry-Run">Dry-Run anwenden</button>
+    <button id="btnPolicyApply" title="YAML anwenden und speichern" aria-label="Apply Policy">Apply</button>
         <small id="policyInfo" style="color:#9ca3af"></small>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:start">
@@ -2205,7 +2205,7 @@ section, section * { word-break: break-word; overflow-wrap: anywhere }
 <div id="helpOverlay" style="position:fixed;right:16px;bottom:16px;z-index:9999;background:#111827;border:1px solid #374151;padding:12px 14px;width:300px;max-height:60vh;overflow:auto;border-radius:10px;box-shadow:0 4px 18px -2px #0009;font-size:12px;display:none">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
         <strong style="font-size:13px">Hilfe & Kontext</strong>
-        <button id="helpClose" style="background:#1f2937;border:0;color:#9ca3af;font-size:16px;line-height:16px;cursor:pointer">×</button>
+    <button id="helpClose" title="Hilfe schließen" aria-label="Hilfe schließen" style="background:#1f2937;border:0;color:#9ca3af;font-size:16px;line-height:16px;cursor:pointer">×</button>
     </div>
     <div id="helpTabs" style="display:flex;gap:6px;margin-bottom:6px">
         <button data-tab="tips" class="htab active" style="flex:1;background:#2563eb;border:0;padding:4px 6px;border-radius:4px;color:#fff;cursor:pointer;font-size:11px">Tipps</button>
@@ -2213,10 +2213,10 @@ section, section * { word-break: break-word; overflow-wrap: anywhere }
     </div>
     <div id="helpContent"></div>
     <div style="margin-top:8px;text-align:right">
-        <button id="helpPin" style="background:#374151;border:0;color:#d1d5db;padding:3px 8px;font-size:11px;border-radius:4px;cursor:pointer">Pin</button>
+    <button id="helpPin" title="Hilfe-Fenster fixieren" aria-label="Hilfe fixieren" style="background:#374151;border:0;color:#d1d5db;padding:3px 8px;font-size:11px;border-radius:4px;cursor:pointer">Pin</button>
     </div>
 </div>
-<button id="helpToggle" style="position:fixed;right:16px;bottom:16px;z-index:9998;background:#2563eb;border:none;color:#fff;padding:10px 14px;border-radius:50%;font-size:18px;cursor:pointer;box-shadow:0 4px 12px -2px #000a">?</button>
+<button id="helpToggle" title="Hilfe öffnen" aria-label="Hilfe öffnen" style="position:fixed;right:16px;bottom:16px;z-index:9998;background:#2563eb;border:none;color:#fff;padding:10px 14px;border-radius:50%;font-size:18px;cursor:pointer;box-shadow:0 4px 12px -2px #000a">?</button>
 <div id="paneStory" style="display:block"><div class=flex>
  <div class=col>
     <section id=stateSec><h2>Zustand</h2><div id=stateBox>lade...</div>
@@ -2239,7 +2239,7 @@ section, section * { word-break: break-word; overflow-wrap: anywhere }
             <label style="font-size:12px">Stimme
                 <select id=styleVoice style="margin-left:6px;background:#111722;color:#fff;border:1px solid #2c333f;border-radius:4px;padding:4px 6px;min-width:160px"></select>
             </label>
-            <button id=btnSaveStyle class=secondary>Stil speichern</button>
+            <button id=btnSaveStyle class=secondary title="Ton, Temperatur und Stimme speichern" aria-label="Stil speichern">Stil speichern</button>
             <small id=styleInfo style="color:#9ca3af"></small>
         </div>
         <div style="border-top:1px solid #2c333f;margin:8px 0"></div>
@@ -2248,16 +2248,16 @@ section, section * { word-break: break-word; overflow-wrap: anywhere }
             <label style="font-size:12px">Wahrscheinlichkeit
                 <input id=evtProb type=number min=0 max=1 step=0.05 style="width:80px;margin-left:6px" />
             </label>
-            <button id=btnSaveEvents class=secondary>Ereignisse speichern</button>
+            <button id=btnSaveEvents class=secondary title="Konfiguration für Zufallsereignisse speichern" aria-label="Ereignisse speichern">Ereignisse speichern</button>
             <small id=eventsInfo style="color:#9ca3af"></small>
         </div>
     </section>
     <section><h2>Aktion</h2>
         <div class=opts id=optsBox></div>
-        <input id=freeText placeholder="Freitext Aktion" />
-        <button id=btnFree>Freitext senden</button>
-        <button class=secondary id=btnAdvance>Zeit voranschreiten</button>
-        <button class=secondary id=btnRegen>Optionen neu</button>
+    <input id=freeText placeholder="Freitext Aktion" title="Kurze freie Aktion (wirkt sich leicht auf Ressourcen aus)" aria-label="Freitext" />
+    <button id=btnFree title="Freitext-Aktion auslösen" aria-label="Freitext senden">Freitext senden</button>
+    <button class=secondary id=btnAdvance title="Zeit voranschreiten (passive Effekte)" aria-label="Zeit voranschreiten">Zeit voranschreiten</button>
+    <button class=secondary id=btnRegen title="Optionen neu berechnen" aria-label="Optionen neu">Optionen neu</button>
     </section>
     
  </div>
@@ -3059,8 +3059,8 @@ async def root() -> HTMLResponse:  # type: ignore[override]
 <h1>Übersicht</h1>
 <p>Wichtige Bereiche:</p>
 <ul>
- <li><a href='/ui'>Haupt-UI</a></li>
- <li><a href='/story/ui'>Story</a> (lebendiges Erzählsystem)</li>
+ <li><a href='/ui'>Haupt-UI (Alt/Legacy)</a></li>
+ <li><a href='/story/ui'>Neue UI (Beta)</a> – umfasst Dashboard, Story, Suggestions, Plan→PR und Policies</li>
  <li><a href='/docs'>OpenAPI Docs</a></li>
  <li><a href='/metrics'>Prometheus Metriken</a></li>
 </ul>

@@ -1,3 +1,170 @@
+Drop-in für copilot-instructions.md
+
+Tipp: Datei so ins Repo legen/aktualisieren. Copilot liest das als Leitplanke.
+
+# Copilot Upgrade Brief — Accounts, Rollen, UI-Refresh, Story-Boost
+
+## Zielbild
+Erweitere das bestehende FastAPI-Backend + Web-UI um:
+1) **Login/Accounts** mit JWT (HTTP Bearer), sichere Passwort-Hashes, Profile.
+2) **RBAC** (Rollen: `beginner`, `advanced`, `pro`) + Sichtbarkeit in UI.
+3) **Privat/Öffentlich**-Flag für Story/Quests/Artefakte.
+4) **Modus-Schalter** (`productive`, `creative`, `playful`) mit konditionalem Rendering.
+5) **UI-Refresh** (Tailwind v4, konsistente Cards/Sidebar/Header, Light/Dark).
+6) **OpenAPI-Security** sauber hinterlegt; `/docs` verlangt Token für schreibende Routen.
+
+> Ausgangslage: UI unter `/ui`, Story-UI unter `/story/ui`, offene Endpunkte siehe README (Plan/Suggest/Policy/Quest/Thought/Metrics/Events). Keine direkten Main-Writes, PR-Flow bleibt Standard.
+
+---
+
+## Architekturentscheidungen (nicht verhandeln)
+- **Auth**: OAuth2 Password Flow mit **JWT Bearer**; Passwörter gehasht; Token-TTL + Refresh.
+- **Rollen** im User-Objekt (`role` Enum) + **Scopes** je Endpunkt; Dependency prüft Rolle.
+- **OpenAPI**: `components.securitySchemes.bearerAuth` + `security` je Route.
+- **Secrets** nur über Env Vars (`.env` lokal, Render Dashboard in Prod).
+- **UI**: Tailwind v4; Komponenten als modulare Cards; **conditional rendering** nach Rolle/Modus.
+- **Persistenz**: kleine User-Tabelle (SQLite dev, Postgres prod) + Profileinstellungen.
+
+---
+
+## Tasks (in separaten PRs, genau in dieser Reihenfolge)
+
+### PR1 — Auth Backend (FastAPI)
+**Änderungen**
+- `api/auth.py`: Endpunkte `POST /auth/signup`, `POST /auth/login` → JWT ausgeben.
+- `api/security.py`: Password hashing, JWT encode/decode, `get_current_user()`, `require_role(roles: list)`.
+- `api/models.py`: `User {id, email, password_hash, role, created_at}`; `Profile {user_id, mode, theme}`.
+- `api/app.py`: schreibende Routen (Plan/Suggest/Policy/Story-POSTs) mit `Depends(get_current_user)`.
+- OpenAPI: `bearerAuth` Security Scheme + globale `security` für schreibende Pfade.
+
+**Akzeptanzkriterien**
+- Signup/Login liefern JWT; geschützte Routen antworten 401 ohne Token.
+- Passwörter sind gehasht; kein Klartext in DB.
+- `/docs` zeigt Lock-Icon u. akzeptiert Bearer-Token.
+
+### PR2 — RBAC & Visibility
+**Änderungen**
+- `api/security.py`: `require_role(["advanced","pro"])` etc.
+- Tagge Ressourcen mit `visibility: "private" | "public"` (Story/Quest/Artifacts).
+- Filter in `GET`-Endpunkten: nicht-Owner sehen nur `public`.
+
+**Akzeptanzkriterien**
+- Beginner sieht reduzierte Endpunkte/Infos, Advanced/Pro mehr.
+- Öffentliche Storys/Quests sind ohne Login lesbar (falls gewünscht), private nur owner.
+
+### PR3 — UI-Refresh (Tailwind v4)
+**Änderungen**
+- `ui/` Tailwind v4 Setup (Vite + `@tailwindcss/vite`), Basis-Tokens, Light/Dark Toggle.
+- Komponenten: `AppShell` (Sidebar+Header), `Card`, `Metric`, `DiffViewerPanel`, `StoryPanel`, `ModeToggle`, `RoleBadge`.
+- **Modus-Schalter** (productive/creative/playful) im Header; lokale Speicherung + Server-Sync (`/profile`).
+- **Rollen-Sichtbarkeit**: UI-Guards (Wrapper `RequireRole`).
+
+**Akzeptanzkriterien**
+- Responsives Layout; konsistente Abstände/Typo; keine Layout-Sprünge.
+- Umschalten der Modi ändert sichtbar Layout/Details (z. B. Kreativ → mehr Story-Flair, Produktiv → kompaktes KPI-Panel).
+
+### PR4 — Story 2.0 (Bögen, Begleiter, Konsequenzen)
+**Änderungen**
+- `api/story.py`:  
+  - `GET/POST /story/arc` (aktueller Story-Bogen),  
+  - `POST /story/advance` (Entscheidung mit Kosten/Nutzen, Konsequenzen),  
+  - `GET /story/companions` (mit Mini-Quests),  
+  - `GET /story/summary` (LLM-Rückblick).
+- State-Felder: `resources {energy,time,inspiration,reputation}`, `arc`, `companions[]`, `flags`.
+- UI: Arc-Navigator, Option-Karten mit **Kosten/Gewinn**, Consequence-Toasts, Begleiter-Panel.
+
+**Akzeptanzkriterien**
+- Jede Entscheidung zeigt **Trade-offs**; Log lässt sich rückblickend lesen.
+- Rückblick generiert sinnvolle Zusammenfassung (LLM optional; heuristische Fallbacks vorhanden).
+
+### PR5 — OpenAPI & Policy Cleanup
+**Änderungen**
+- `docs/openapi.yaml`: bearerAuth; Scopes/Role-Hinweise pro Pfad; Beispiele.
+- Policy-Gates vermerken geschützte Pfade + Dry-Run erhalten.
+- In README Quickstart für Auth/Rollen + Render-Env Vars.
+
+**Akzeptanzkriterien**
+- `/openapi.json` enthält `securitySchemes` + `security`; Swagger-UI fordert Token für POST/PUT/DELETE.
+
+---
+
+## Snippets (Vorlagen für Copilot)
+
+### OpenAPI Security (YAML)
+```yaml
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+security:
+  - bearerAuth: []
+
+FastAPI Dependencies
+# api/security.py
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+
+def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
+    # decode + validate JWT, load user
+    ...
+
+def require_role(roles: list[str]):
+    def _deps(user: User = Depends(get_current_user)):
+        if user.role not in roles: raise HTTPException(status_code=403)
+        return user
+    return _deps
+
+UI Guards (Pseudo-TS/React)
+export function RequireRole({ role, children }) {
+  const { user } = useAuth();
+  if (!user || ![role].flat().includes(user.role)) return null;
+  return children;
+}
+
+Modus-Toggle (persist + server-sync)
+const [mode, setMode] = useState(localStorage.getItem("mode") ?? "productive");
+useEffect(() => {
+  localStorage.setItem("mode", mode);
+  fetch("/profile", { method:"PATCH", headers:{Authorization: bearer()}, body: JSON.stringify({ mode }) });
+}, [mode]);
+```
+
+Was Copilot berücksichtigen soll (Kontext/Doku)
+
+Bestehende Features & Pfade: UI /ui, Story-UI /story/ui, Plan/Suggest/Policy/Quest/Thought/Metrics/Events/Impact/Idle/PR-Flow (siehe README). 
+GitHub
+
+JWT + OAuth2 in FastAPI: Passwort-Hashing, Bearer-Token, Dependencies. 
+fastapi.tiangolo.com
++1
+
+OpenAPI Bearer Auth: Security Scheme + global/operation-level security. 
+Swagger
++1
+
+Tailwind Setup (Vite, v4): Install/Plugin/Import; Komponentenbau. 
+tailwindcss.com
++1
+
+Render-Secrets: Env Vars statt .env im Repo (Prod). 
+Render
+
+RBAC-Pattern: Rollen definieren, im Token/Profil führen, UI/Backend konsistent prüfen. 
+Microsoft Learn
++1
+
+Acceptance-Matrix (Kurz)
+
+Auth: 401/403 korrekt; Passwort nie im Klartext.
+
+RBAC: Beginner sieht nur Kern; Advanced/Pro weitere Tabs/Knöpfe; öffentlich vs. privat greift.
+
+UI: Tailwind v4, responsive, konsistente Cards, Dark/Light; Modus-Umschalter funktioniert.
+
+Story: Arc-Wechsel, Begleiter-Miniquests, Konsequenzen sichtbar; Rückblick generiert.
+
+Docs: /docs zeigt BearerAuth; README „5-Min-Start“ für Login/Token.
 # Copilot System Instructions — Life-Agent v7
 
 ## Mission
