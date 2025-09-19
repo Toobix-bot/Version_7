@@ -163,11 +163,11 @@ def init_db() -> None:
         """
     )
     db_conn.commit()
-    # seed minimal story companions / skills if empty (replicated subset)
+    # seed minimal story companions / skills / buffs if empty (replicated subset)
     try:
+        now = time.time()
         cur = db_conn.execute("SELECT COUNT(*) FROM story_companions")
         if cur.fetchone()[0] == 0:
-            now = time.time()
             seeds = [
                 ("Mentor", "weise", "ruhig", {"bonus_wissen":5,"empatie":3}),
                 ("Späher", "wendig", "wachsam", {"sicht":7,"tempo":2}),
@@ -183,6 +183,17 @@ def init_db() -> None:
                 db_conn.execute(
                     "INSERT INTO story_skills(name,level,xp,category,updated_at) VALUES (?,?,?,?,?)",
                     (name,lvl,xp,cat,time.time())
+                )
+        cur = db_conn.execute("SELECT COUNT(*) FROM story_buffs")
+        if cur.fetchone()[0] == 0:
+            buff_seeds = [
+                ("klarheit", "geist", 5, now + 3600, {"beschreibung": "Gedanken sind geordnet"}),
+                ("flow", "tempo", 3, now + 900, {"beschreibung": "Erhöhte kreative Durchsatzrate"}),
+            ]
+            for label, kind, magnitude, expires_at, meta in buff_seeds:
+                db_conn.execute(
+                    "INSERT INTO story_buffs(label,kind,magnitude,expires_at,meta) VALUES (?,?,?,?,?)",
+                    (label, kind, magnitude, expires_at, json.dumps(meta))
                 )
         db_conn.commit()
     except Exception:
