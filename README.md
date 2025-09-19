@@ -4,16 +4,30 @@ Self-Observing Life-Agent Development Environment (MVP).
 
 > Dokumentationsstruktur nach Divio: Tutorial (Start), How-To (Aufgaben), Reference (API/Felder), Explanation (Hintergründe). Dieser README bündelt die wichtigsten Einstiegspfade für schnelle Wirksamkeit.
 
+Hinweis/Quick Links:
+- PR-Roadmap & Leitplanken: siehe [copilot-instructions.md](./copilot-instructions.md)
+
 ## Kurz erklärt
 Ein kleiner Server mit UI, der Pläne baut, sich selbst beobachtet und sich per Regeln steuern lässt. In der Web-UI siehst du Meta/LLM-Infos, eine Plan-Demo, einen LLM-Chat (sparsam) sowie Live-Bereiche für Events & Metrics.
 
 Neu: Tab-basierte deutsche UI, Impact-Score für Vorschläge, Multi-Agent Memory (`agent_id`), Quest-Fortschritt, kategorisierte Gedanken (risk/opportunity/action/system/neutral), verbesserter Diff-Viewer (Zeilennummern, Suche, Hunk-Navigation), automatische statische Verbesserungsvorschläge (`/suggest/auto`), Onboarding-Panel ("Erste Schritte"), Endpoint & Script für PR aus Plan (`POST /dev/pr-from-plan`, `scripts/new_pr_from_plan.ps1`), Idle Auto-Ticks bei Inaktivität (`idle.tick.auto` Events) sowie Policy Dry-Run Shortcut (`/policy/dry-run`).
+
+Frisch dazu:
+- Dashboard-Toast bei `suggest.generated`
+- Idle Tipps im Dashboard per `idle.suggest`
+- "Aktiv seit"-Timer (umschaltet bei Useraktionen vs. `idle.tick.auto`)
+- Begrenzte SSE-Queue mit Metrik `sse_queue_dropped_total` (Dropping bei Überlauf)
 
 Wichtiges auf einen Blick:
 - OpenAPI-Doku: `/docs` (Header `X-API-Key` erforderlich)
 - Live-JSON: `/openapi.json` (enthält `servers` und Security-Schema)
 - Statische Spec: `docs/openapi.yaml` (für GitHub Pages / GPT Actions)
 - Dashboard: `/ui`
+
+SSE & API-Key (Wichtig):
+- EventSource kann keine eigenen Header senden. Der Server akzeptiert daher den API-Key auch als Query-Parameter: `/events?key=<API_KEY>`.
+- Für `fetch()`-Aufrufe weiterhin `X-API-Key` im Header setzen.
+ - Optional: Queuegröße via `SSE_QUEUE_MAX` (Default 1000). Bei Overflow werden älteste Events verworfen; Metrik `sse_queue_dropped_total` zählt Drops.
 
 ## Tutorial – In 5 Minuten zum ersten Plan
 1. API-Key setzen: `.env` anlegen `API_TOKENS=test` oder Env Var exportieren. UI öffnen (`/ui`), rechts oben Key eingeben – Badge wird grün.

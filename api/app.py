@@ -112,7 +112,17 @@ async def _lifespan(app_: FastAPI):  # pragma: no cover - setup wiring
         asyncio.create_task(_idle_background_loop())
     except Exception:
         logger.warning("failed to start idle background loop")
-    yield
+    try:
+        yield
+    finally:
+        # graceful shutdown: close DB connection
+        try:
+            global db_conn
+            if db_conn is not None:
+                db_conn.close()
+                db_conn = None
+        except Exception:
+            pass
 
 app = FastAPI(title="Life-Agent Dev Environment", version="0.1.0", lifespan=_lifespan)
 
@@ -275,12 +285,13 @@ except Exception:
 state: Dict[str, Any] = {"agents": {}, "meta": {"version": app.version, "start": APP_START}}
 # Event queue must be bound to the active loop; tests may recreate loops. Use a mapping per loop id.
 _event_queues: dict[int, asyncio.Queue[dict[str, Any]]] = {}
+SSE_QUEUE_MAX = int(os.getenv("SSE_QUEUE_MAX", "1000"))
 
 def _get_event_queue() -> asyncio.Queue[dict[str, Any]]:
     loop = asyncio.get_running_loop()
     q = _event_queues.get(id(loop))
     if q is None:
-        q = asyncio.Queue()
+        q = asyncio.Queue(maxsize=SSE_QUEUE_MAX if SSE_QUEUE_MAX > 0 else 0)
         _event_queues[id(loop)] = q
     return q
 policies: dict[str, Any] = {"loaded_at": time.time(), "rules": []}
@@ -328,6 +339,7 @@ PLAN_VARIANT_GENERATED_TOTAL = Counter(
     ["variant_id", "risk_budget", "explore"],
     registry=REGISTRY,
 )
+SSE_QUEUE_DROPPED_TOTAL = Counter("sse_queue_dropped_total", "Dropped SSE events due to queue overflow", registry=REGISTRY)
 
 # ---- Balance Parameter (env overrides) ----
 XP_BASE = float(os.getenv("STORY_XP_BASE", "80"))
@@ -1875,7 +1887,26 @@ async def emit_event(kind: str, data: dict[str, Any]) -> None:
             db_conn.commit()
         except Exception:
             pass
-    await _get_event_queue().put(record)
+    # Try non-blocking enqueue; on overflow drop one oldest and retry
+    try:
+        _get_event_queue().put_nowait(record)
+    except Exception:
+        try:
+            q = _get_event_queue()
+            try:
+                _ = q.get_nowait()
+            except Exception:
+                pass
+            try:
+                q.put_nowait(record)
+            except Exception:
+                pass
+            try:
+                SSE_QUEUE_DROPPED_TOTAL.inc()
+            except Exception:
+                pass
+        except Exception:
+            pass
     # mark activity (exclude thought noise to allow idle auto ticks)
     global _last_activity_ts
     if not kind.startswith("thought."):
@@ -2051,7 +2082,12 @@ section, section * { word-break: break-word; overflow-wrap: anywhere }
         <span id="navSSE" class="badge">SSE: ?</span>
         <span id="navMetrics" class="badge">/metrics: ?</span>
         <span id="navSug" class="badge">Vorschläge: ?</span>
+        <button id="btnChangeKey" class="secondary" title="API Key ändern" aria-label="API Key ändern" style="margin-left:8px">Key ändern</button>
     </div>
+</div>
+<div id="apiKeyBanner" style="display:none;padding:8px;border:1px solid #f59e0b;background:#1f2937;color:#f59e0b;border-radius:6px;margin:8px 0">
+    Fehlender oder ungültiger API Key.
+    <button id="bannerChangeKey" class="secondary" style="margin-left:8px">API Key ändern</button>
 </div>
 <section id="accountSec" style="margin-top:8px;display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
     <div id="authBox" style="display:flex;gap:8px;align-items:end;flex-wrap:wrap">
@@ -2116,6 +2152,26 @@ section, section * { word-break: break-word; overflow-wrap: anywhere }
         </div>
     </div>
 </section>
+<!-- API Key Modal -->
+<div id="keyModalWrap" style="display:none;position:fixed;inset:0;z-index:10000;background:#0008;backdrop-filter:blur(2px)">
+    <div role="dialog" aria-modal="true" aria-labelledby="keyModalTitle" style="background:var(--panel);color:var(--fg);border:1px solid var(--border);border-radius:10px;box-shadow:0 10px 30px -10px #000a;max-width:420px;width:92%;margin:10vh auto 0;padding:14px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+            <strong id="keyModalTitle" style="font-size:14px">API Key eingeben</strong>
+            <button id="keyModalClose" class="secondary" aria-label="Schließen" title="Schließen" style="padding:2px 8px">×</button>
+        </div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:6px">Der Key wird lokal im Browser gespeichert und für API-Aufrufe genutzt.</div>
+        <label style="display:block;font-size:12px;margin-bottom:8px">API Key
+            <input id="keyModalInput" type="text" placeholder="z. B. test" style="width:100%;margin-top:4px;padding:8px;background:#111722;color:#fff;border:1px solid var(--border);border-radius:6px" />
+        </label>
+        <div style="display:flex;gap:8px;justify-content:flex-end">
+            <button id="keyModalCancel" class="secondary">Abbrechen</button>
+            <button id="keyModalSave">Speichern</button>
+        </div>
+    </div>
+    <div tabindex="0"></div>
+    <div tabindex="0"></div>
+    <div tabindex="0"></div>
+</div>
 <section id="paneDashboard" style="display:none">
     <h2>Dashboard</h2>
     <div style="display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(260px,1fr))">
@@ -2124,6 +2180,16 @@ section, section * { word-break: break-word; overflow-wrap: anywhere }
             <div style="margin-top:6px">
                 <div>SSE-Status: <span id="dashSse" class="badge">?</span></div>
                 <div>/metrics: <span id="dashMetrics" class="badge">?</span></div>
+                <div>Status: <span id="dashActive" class="badge">aktiv?</span> <small id="dashSince" style="color:var(--muted);margin-left:6px">seit –</small></div>
+            </div>
+        </div>
+        <div class="card" style="padding:10px;background:var(--panel);border:1px solid var(--border);border-radius:8px">
+            <strong>Agentenauftrag</strong>
+            <div style="margin-top:6px;font-size:12px;color:var(--muted)">Beschreibe kurz, was der Agent verbessern soll. Wir erzeugen Vorschläge und öffnen die Liste.</div>
+            <input id="agentOrderGoal" placeholder="z. B. Key-UX weiter verbessern" style="width:100%;margin-top:6px;padding:6px;background:#111722;color:#fff;border:1px solid var(--border);border-radius:6px" />
+            <div style="margin-top:6px;display:flex;gap:8px;align-items:center">
+                <button id="agentOrderRun" title="Vorschlag generieren">Vorschlag generieren</button>
+                <small id="agentOrderInfo" style="color:#9ca3af"></small>
             </div>
         </div>
         <div class="card" style="padding:10px;background:var(--panel);border:1px solid var(--border);border-radius:8px">
@@ -2133,6 +2199,10 @@ section, section * { word-break: break-word; overflow-wrap: anywhere }
         <div class="card" style="padding:10px;background:var(--panel);border:1px solid var(--border);border-radius:8px">
             <strong>Letzte Story-Ereignisse</strong>
             <div id="dashStory" style="margin-top:6px;font-size:12px;max-height:160px;overflow:auto"></div>
+        </div>
+        <div class="card" style="padding:10px;background:var(--panel);border:1px solid var(--border);border-radius:8px">
+            <strong>Idle Tipps</strong>
+            <div id="dashIdleTips" style="margin-top:6px;font-size:12px;color:var(--muted)">(noch keine)</div>
         </div>
     </div>
 </section>
@@ -2232,6 +2302,7 @@ section, section * { word-break: break-word; overflow-wrap: anywhere }
     </div>
 </div>
 <button id="helpToggle" title="Hilfe öffnen" aria-label="Hilfe öffnen" style="position:fixed;right:16px;bottom:16px;z-index:9998;background:#2563eb;border:none;color:#fff;padding:10px 14px;border-radius:50%;font-size:18px;cursor:pointer;box-shadow:0 4px 12px -2px #000a">?</button>
+<div id="toastHost" style="position:fixed;left:50%;transform:translateX(-50%);bottom:24px;z-index:10000;display:flex;flex-direction:column;gap:8px;align-items:center"></div>
 <div id="paneStory" style="display:block"><div class=flex>
  <div class=col>
     <section id=stateSec><h2>Zustand</h2><div id=stateBox>lade...</div>
@@ -2284,19 +2355,22 @@ section, section * { word-break: break-word; overflow-wrap: anywhere }
  </div>
 </div></div>
 <script>
-const apiKey = localStorage.getItem('api_key') || prompt('API Key?'); if(apiKey) localStorage.setItem('api_key', apiKey);
+// Seed API Key once on first load (optional prompt); thereafter always read via getApiKey()
+(function(){ try{ const k = localStorage.getItem('api_key') || prompt('API Key?'); if(k) localStorage.setItem('api_key', k); }catch(_){} })();
+function getApiKey(){ try{ return localStorage.getItem('api_key') || ''; }catch(_){ return ''; } }
 let currentPane='dashboard';
 function setPane(which){ try{
     currentPane = which;
     const ids=['paneDashboard','paneStory','paneSuggestions','panePlanPR','panePolicies'];
     ids.forEach(id=>{ const el=document.getElementById(id); if(el){ el.style.display = (id.toLowerCase()===('pane'+which).toLowerCase() || (which==='story' && id==='paneStory') || (which==='dashboard' && id==='paneDashboard'))? 'block':'none'; }});
 }catch(_){}}
-const H = {'X-API-Key': apiKey};
 function j(el, html){document.getElementById(el).innerHTML=html}
 function escapeHtml(s){ try{ return String(s).replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c])); }catch(_){ return String(s); } }
-function fetchJSON(p,opt={}){opt.headers={...(opt.headers||{}),...H,'Content-Type':'application/json'};return fetch(p,opt).then(r=>{if(!r.ok) throw new Error(r.status); return r.json()})}
+function fetchJSON(p,opt={}){ const H={'X-API-Key': getApiKey()}; opt.headers={...(opt.headers||{}),...H,'Content-Type':'application/json'};return fetch(p,opt).then(r=>{if(!r.ok) throw new Error(r.status); return r.json()})}
 function setKeyStatus(txt,color){ const el=document.getElementById('keyStatus'); if(el){ el.textContent='[Key: '+txt+']'; el.style.color=color||'#888'; } }
 function setBadge(id,label,isOk){ const el=document.getElementById(id); if(!el) return; el.textContent='['+label+': '+(isOk?'✓':'×')+']'; el.style.color=isOk?'#10b981':'#ef4444'; }
+function showKeyBanner(){ const el=document.getElementById('apiKeyBanner'); if(el){ el.style.display='block'; }}
+function hideKeyBanner(){ const el=document.getElementById('apiKeyBanner'); if(el){ el.style.display='none'; }}
 async function checkAuth(){
     try{
         const r = await fetchJSON('/health/dev');
@@ -2305,11 +2379,13 @@ async function checkAuth(){
         setBadge('metaStatus','meta', !!r.meta_ok);
         setBadge('llmStatus','llm', !!r.llm_ok);
         setBadge('policyStatus','policy', !!r.policy_ok);
+        hideKeyBanner();
     } catch(e){
         setKeyStatus('invalid','#ef4444');
         setBadge('metaStatus','meta', false);
         setBadge('llmStatus','llm', false);
         setBadge('policyStatus','policy', false);
+        showKeyBanner();
     }
 }
 function fmtResBlocks(r){const maxMap={energie:100,wissen:200,inspiration:100,ruf:100,stabilitaet:100,erfahrung:1000,level:20};return '<div class="res-list">'+Object.entries(r).map(([k,v])=>{const max=maxMap[k]||100;const pct=Math.min(100,Math.round((v/max)*100));return `<div class='res' data-k='${k}'><div><b>${k}</b> <span style='float:right'>${v}</span></div><div class='bar'><span style='width:${pct}%'></span></div></div>`}).join('')+'</div>'}
@@ -2319,10 +2395,14 @@ function renderSkills(list){const box=document.getElementById('skillsBox'); if(!
 function loadState(){fetchJSON('/story/state').then(st=>{const energy=st.resources.energie||0; const energyWarn = energy<30?"<div style='color:#f59e0b;font-size:11px;margin-top:6px'>Niedrige Energie</div>":""; const arcColor = st.arc.includes('krise')?'#dc2626':(st.arc.includes('aufbau')?'#2563eb':(st.arc.includes('ruhe')?'#10b981':'#6b7280')); const arcBadge = `<span style='background:${arcColor};padding:2px 8px;border-radius:12px;font-size:11px;margin-left:8px'>${st.arc}</span>`; j('stateBox',`Arc: <b>${st.arc}</b>${arcBadge}<br>Mood: ${st.mood}<br>Epoch: ${st.epoch}<br>${fmtResBlocks(st.resources)}${energyWarn}`);renderCompanions(st.companions);renderBuffs(st.buffs);renderSkills(st.skills);renderOpts(st.options)}).catch(e=>console.error(e))}
 function renderOpts(opts){const box=document.getElementById('optsBox');box.innerHTML=''; if(!opts.length){box.textContent='(keine)';return} opts.forEach(o=>{const b=document.createElement('button'); b.textContent=`${o.label}`; if((o.tags||[]).includes('levelup')){b.classList.add('levelup')} const riskSpan=document.createElement('span'); riskSpan.className='risk r'+(o.risk||0); riskSpan.textContent='R'+(o.risk||0); b.appendChild(riskSpan); b.onclick=()=>act(o.id); box.appendChild(b)})}
 function loadLog(){fetchJSON('/story/log?limit=80').then(events=>{const box=document.getElementById('logBox'); box.innerHTML=events.map(e=>{let badges=''; if(e.deltas){ if(e.deltas.level>0){badges+=`<span class='badge level'>Level +${e.deltas.level}</span>`;} if(e.deltas.inspiration && e.deltas.inspiration>5){badges+=`<span class='badge insp'>+${e.deltas.inspiration} Insp</span>`;} } return `<div class='log-item kind-${e.kind}'>[${e.epoch}] <span>${e.kind}</span>: ${e.text} ${badges}</div>`}).join(''); const d=document.getElementById('dashStory'); if(d){ d.innerHTML = (events||[]).slice(-8).reverse().map(e=>{ return `<div style='opacity:.9'>[${e.epoch}] ${e.kind}: ${e.text}</div>`; }).join(''); } }).catch(e=>{})}
-function act(id){fetchJSON('/story/action',{method:'POST',body:JSON.stringify({option_id:id})}).then(e=>{loadState();prependLog(e)})}
-function free(){const t=document.getElementById('freeText').value.trim(); if(!t) return; fetchJSON('/story/action',{method:'POST',body:JSON.stringify({free_text:t})}).then(e=>{document.getElementById('freeText').value=''; loadState(); prependLog(e)})}
-function advance(){fetchJSON('/story/advance',{method:'POST'}).then(e=>{loadState();prependLog(e)})}
-function regen(){fetchJSON('/story/options/regen',{method:'POST'}).then(_=>loadState())}
+function setActiveBadge(active){ try{ const el=document.getElementById('dashActive'); if(!el) return; if(active){ el.textContent='aktiv'; el.style.color='#10b981'; } else { el.textContent='passiv'; el.style.color='#f59e0b'; } }catch(_){} }
+let _activeSince=Date.now(); let _sinceTimer=null; function _updateSince(){ try{ const el=document.getElementById('dashSince'); if(!el) return; const secs=Math.max(0, Math.floor((Date.now()-_activeSince)/1000)); const mm=Math.floor(secs/60); const ss=secs%60; el.textContent = 'seit '+(mm>0?(mm+'m '+ss+'s'):(ss+'s')); }catch(_){} }
+function markActive(){ setActiveBadge(true); _activeSince=Date.now(); if(_sinceTimer){ clearInterval(_sinceTimer); } _sinceTimer=setInterval(_updateSince,1000); _updateSince(); }
+function markPassive(){ setActiveBadge(false); _activeSince=Date.now(); if(_sinceTimer){ clearInterval(_sinceTimer); } _sinceTimer=setInterval(_updateSince,1000); _updateSince(); }
+function act(id){ markActive(); fetchJSON('/story/action',{method:'POST',body:JSON.stringify({option_id:id})}).then(e=>{loadState();prependLog(e)})}
+function free(){ const t=document.getElementById('freeText').value.trim(); if(!t) return; markActive(); fetchJSON('/story/action',{method:'POST',body:JSON.stringify({free_text:t})}).then(e=>{document.getElementById('freeText').value=''; loadState(); prependLog(e)})}
+function advance(){ markActive(); fetchJSON('/story/advance',{method:'POST'}).then(e=>{loadState();prependLog(e)})}
+function regen(){ markActive(); fetchJSON('/story/options/regen',{method:'POST'}).then(_=>loadState())}
 function prependLog(ev){const box=document.getElementById('logBox'); const div=document.createElement('div');div.className='log-item kind-'+ev.kind; div.innerHTML=`[${ev.epoch}] <span>${ev.kind}</span>: ${ev.text}`; box.prepend(div)}
 document.getElementById('btnFree').onclick=free; document.getElementById('btnAdvance').onclick=advance; document.getElementById('btnRegen').onclick=regen;
 // Bind style/events buttons
@@ -2335,6 +2415,25 @@ document.getElementById('btnLogout').onclick=doLogout;
 // Bind view settings save
 document.getElementById('btnSaveView').onclick=saveView;
 document.getElementById('btnApplyPalette').onclick=savePalette;
+// Bind API Key change buttons
+const changeKeyBtn=document.getElementById('btnChangeKey'); if(changeKeyBtn){ changeKeyBtn.onclick=openKeyModal; }
+const changeKeyBannerBtn=document.getElementById('bannerChangeKey'); if(changeKeyBannerBtn){ changeKeyBannerBtn.onclick=openKeyModal; }
+// Modal handlers
+function openKeyModal(){ try{
+    const wrap=document.getElementById('keyModalWrap'); const inp=document.getElementById('keyModalInput');
+    if(wrap){ wrap.style.display='block'; }
+    if(inp){ inp.value = getApiKey()||''; inp.focus(); inp.select && inp.select(); }
+}catch(_){}}
+function closeKeyModal(){ try{ const wrap=document.getElementById('keyModalWrap'); if(wrap){ wrap.style.display='none'; } }catch(_){}}
+async function saveKeyFromModal(){ try{
+    const inp=document.getElementById('keyModalInput'); const v=(inp&&inp.value?inp.value:'').trim();
+    if(!v){ return; }
+    try{ localStorage.setItem('api_key', v); }catch(_){ }
+    setKeyStatus('geändert','#10b981'); hideKeyBanner(); restartSSE(); await checkAuth(); closeKeyModal();
+}catch(_){}}
+const keyModalSave=document.getElementById('keyModalSave'); if(keyModalSave){ keyModalSave.onclick=saveKeyFromModal; }
+const keyModalCancel=document.getElementById('keyModalCancel'); if(keyModalCancel){ keyModalCancel.onclick=closeKeyModal; }
+const keyModalClose=document.getElementById('keyModalClose'); if(keyModalClose){ keyModalClose.onclick=closeKeyModal; }
 const navBtnDash=document.getElementById('navBtnDashboard'); if(navBtnDash){ navBtnDash.onclick=()=>setPane('dashboard'); }
 const navBtnStory=document.getElementById('navBtnStory'); if(navBtnStory){ navBtnStory.onclick=()=>setPane('story'); }
 const navBtnSug=document.getElementById('navBtnSuggestions'); if(navBtnSug){ navBtnSug.onclick=()=>{ setPane('suggestions'); loadSuggestionsList(); }}
@@ -2343,6 +2442,7 @@ const navBtnPolicies=document.getElementById('navBtnPolicies'); if(navBtnPolicie
 // Initial loads
 setPane('dashboard');
 loadState(); loadLog(); checkAuth(); checkMetrics(); loadOpenSuggestions(); loadStyle(); loadEventsCfg(); loadMe(); loadPalette();
+if(!getApiKey()){ showKeyBanner(); openKeyModal(); }
 // Plan -> PR UI
 function setPRResult(text,color){ const el=document.getElementById('prResult'); if(el){ el.style.color=color||'#9ca3af'; el.textContent=text; } }
 // Account / Settings logic
@@ -2592,7 +2692,8 @@ let es; let esRetry=0; const maxRetry=10; const statusEl=document.getElementById
 function sseSet(st, color){ if(statusEl){ statusEl.textContent='[SSE: '+st+']'; statusEl.style.color=color||'#888'; } const nav=document.getElementById('navSSE'); if(nav){ nav.textContent='SSE: '+st; } const ds=document.getElementById('dashSse'); if(ds){ ds.textContent = st; } }
 function startSSE(){
     try{ if(es){ es.close(); }
-    const sseUrl = '/events' + (apiKey? ('?key='+encodeURIComponent(apiKey)) : '');
+    const curKey = getApiKey();
+    const sseUrl = '/events' + (curKey? ('?key='+encodeURIComponent(curKey)) : '');
     es = new EventSource(sseUrl,{withCredentials:false});
         sseSet('verbunden','#10b981'); esRetry=0;
         es.addEventListener('open',()=>sseSet('offen','#10b981'));
@@ -2601,7 +2702,10 @@ function startSSE(){
         es.addEventListener('story.event',()=>{loadLog()});
                 es.addEventListener('story.event',e=>{try{trackEvent(JSON.parse(e.data))}catch(_){}});
     es.addEventListener('ready',()=>{ checkAuth(); });
-    es.addEventListener('suggest.generated',()=>{ loadOpenSuggestions(); if(currentPane==='suggestions'){ loadSuggestionsList(); } });
+    // idle auto ticks imply passive state
+    es.addEventListener('idle.tick.auto',()=>{ markPassive(); });
+    es.addEventListener('idle.suggest', (e)=>{ try{ const d=JSON.parse(e.data); addIdleTip(d && d.data && d.data.tip ? d.data.tip : (d.tip||'Hinweis')); }catch(_){ addIdleTip('Hinweis'); } });
+    es.addEventListener('suggest.generated',(e)=>{ showToast('Vorschlag erzeugt'); loadOpenSuggestions(); if(currentPane==='suggestions'){ loadSuggestionsList(); } });
     es.addEventListener('suggest.approved',()=>{ loadOpenSuggestions(); if(currentPane==='suggestions'){ loadSuggestionsList(); } });
     es.addEventListener('suggest.revised',()=>{ loadOpenSuggestions(); if(currentPane==='suggestions'){ loadSuggestionsList(); } });
     es.addEventListener('suggest.open',()=>{ loadOpenSuggestions(); });
@@ -2609,7 +2713,22 @@ function startSSE(){
     }catch(e){ console.warn('SSE fail',e); sseSet('fehler','#ef4444'); }
 }
 startSSE();
+// Default to aktiv at start until an idle auto tick is observed
+markActive();
+// Agentenauftrag wiring
+async function runAgentOrder(){ try{ const goal=(document.getElementById('agentOrderGoal').value||'').trim(); const info=document.getElementById('agentOrderInfo'); if(!goal){ if(info){ info.textContent='Bitte Ziel angeben'; info.style.color='#f59e0b'; } return; } if(info){ info.textContent='Erzeuge…'; info.style.color='#9ca3af'; }
+    await fetchJSON('/suggest/generate',{ method:'POST', body: JSON.stringify({ goal }) });
+    if(info){ info.textContent='Erstellt'; info.style.color='#10b981'; setTimeout(()=>{info.textContent='';}, 1200); }
+    try{ const sg=document.getElementById('sugGoal'); if(sg){ sg.value=goal; } }catch(_){ }
+    setPane('suggestions'); await loadSuggestionsList();
+}catch(_){ const info=document.getElementById('agentOrderInfo'); if(info){ info.textContent='Fehler'; info.style.color='#ef4444'; } }}
+const agentBtn=document.getElementById('agentOrderRun'); if(agentBtn){ agentBtn.onclick=runAgentOrder; }
+function changeApiKey(){ openKeyModal(); }
+function restartSSE(){ try{ if(es){ es.close(); } }catch(_){ } startSSE(); }
 setInterval(()=>{loadState();},20000);
+// Toasts & Idle Tips
+function showToast(msg){ try{ const host=document.getElementById('toastHost'); if(!host) return; const el=document.createElement('div'); el.textContent=msg; el.style.cssText='background:#111827;color:#e5e7eb;border:1px solid #374151;border-radius:8px;padding:8px 12px;box-shadow:0 8px 24px -8px #000b;opacity:0.98;'; host.appendChild(el); setTimeout(()=>{ el.style.transition='opacity .5s'; el.style.opacity='0'; setTimeout(()=>{ try{ host.removeChild(el);}catch(_){}} ,500); }, 1800); }catch(_){} }
+let idleTips=[]; function addIdleTip(t){ try{ idleTips.push(String(t)); if(idleTips.length>6) idleTips=idleTips.slice(-6); const box=document.getElementById('dashIdleTips'); if(box){ box.innerHTML = '<ul style="margin:0 0 0 16px;padding:0">'+idleTips.slice().reverse().map(x=>'\n<li>'+escapeHtml(x)+'</li>').join('')+'</ul>'; } }catch(_){} }
 // Log Filter
 document.getElementById('logFilter').addEventListener('input',()=>{ const v = document.getElementById('logFilter').value.trim(); const items=[...document.querySelectorAll('#logBox .log-item')]; let rx=null; try{ rx = v? new RegExp(v,'i'):null;}catch(_){rx=null;} items.forEach(it=>{ const txt=it.textContent||''; it.style.display = !v? '' : (rx? (rx.test(txt)?'':'none') : (txt.toLowerCase().includes(v.toLowerCase())?'':'none')); }); });
 // Metrics & Suggestions

@@ -1,0 +1,76 @@
+{
+  "name": "agent-workbench",
+  "displayName": "Agent Workbench",
+  "description": "Run the FastAPI app inside VS Code with a Webview panel and control the agent from your editor.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "agentWorkbench.startServer",
+        "title": "Agent Workbench: Start Server"
+      },
+      {
+        "command": "agentWorkbench.stopServer",
+        "title": "Agent Workbench: Stop Server"
+      },
+      {
+        "command": "agentWorkbench.openPanel",
+        "title": "Agent Workbench: Open Panel"
+      },
+      {
+        "command": "agentWorkbench.setApiKey",
+        "title": "Agent Workbench: Set API Key"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "Agent Workbench",
+      "properties": {
+        "agentWorkbench.port": {
+          "type": "number",
+          "default": 8000,
+          "description": "Port to run the FastAPI server on"
+        },
+        "agentWorkbench.host": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "description": "Host to bind the FastAPI server"
+        },
+        "agentWorkbench.pythonPath": {
+          "type": "string",
+          "default": "${workspaceFolder}/.venv/Scripts/python.exe",
+          "description": "Path to Python executable to run uvicorn"
+        },
+        "agentWorkbench.uvicornApp": {
+          "type": "string",
+          "default": "api.app:app",
+          "description": "Uvicorn app path"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package",
+    "lint": "echo 'no lint'"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.7",
+    "@types/vscode": "^1.90.0",
+    "tslib": "^2.6.2",
+    "typescript": "^5.4.5",
+    "vsce": "^2.15.0"
+  },
+  "dependencies": {}
+}
