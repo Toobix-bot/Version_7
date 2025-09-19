@@ -17,6 +17,9 @@ from .routes import help as help_routes
 from .routes import advisor as advisor_routes
 from .routes import templates as templates_routes
 
+import api.core.infra as core_infra
+from api.core.infra import emit_event, get_event_queue, get_last_activity
+
 from fastapi import FastAPI, Depends, HTTPException, status, Request, Header, Body, Query
 from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
@@ -267,16 +270,6 @@ except Exception:
     pass
 
 state: Dict[str, Any] = {"agents": {}, "meta": {"version": app.version, "start": APP_START}}
-# Event queue must be bound to the active loop; tests may recreate loops. Use a mapping per loop id.
-_event_queues: dict[int, asyncio.Queue[dict[str, Any]]] = {}
-
-def _get_event_queue() -> asyncio.Queue[dict[str, Any]]:
-    loop = asyncio.get_running_loop()
-    q = _event_queues.get(id(loop))
-    if q is None:
-        q = asyncio.Queue()
-        _event_queues[id(loop)] = q
-    return q
 policies: dict[str, Any] = {"loaded_at": time.time(), "rules": []}
 # ensure db_conn has an explicit typed declaration near top (if not already)
 try:
@@ -1061,6 +1054,7 @@ def init_db() -> None:
     first = not os.path.exists(DB_PATH)
     db_conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     db_conn.execute("PRAGMA journal_mode=WAL;")
+    core_infra.db_conn = db_conn
     # base schema
     db_conn.executescript(
         """
@@ -1329,23 +1323,6 @@ def observer(action_type: str) -> Callable[[Callable[..., Awaitable[T]]], Callab
         return wrapper
     return decorator
 
-async def emit_event(kind: str, data: dict[str, Any]) -> None:
-    record = {"ts": time.time(), "kind": kind, "data": data}
-    if db_conn:
-        try:
-            db_conn.execute(
-                "INSERT INTO events(ts, kind, data) VALUES (?,?,?)",
-                (record["ts"], record["kind"], json.dumps(record["data"]))
-            )
-            db_conn.commit()
-        except Exception:
-            pass
-    await _get_event_queue().put(record)
-    # mark activity (exclude thought noise to allow idle auto ticks)
-    global _last_activity_ts
-    if not kind.startswith("thought."):
-        _last_activity_ts = time.time()
-
 # --------------- Endpoints ------------------
 @app.post("/act")
 @observer("act")
@@ -1416,7 +1393,7 @@ async def events_stream(request: Request, agent: str = Depends(require_auth), ki
                 break
             now = time.time()
             try:
-                evt = await asyncio.wait_for(_get_event_queue().get(), timeout=poll_timeout)
+                evt = await asyncio.wait_for(get_event_queue().get(), timeout=poll_timeout)
                 if allowed is None or evt['kind'] in allowed:
                     payload = f"event: {evt['kind']}\ndata: {json.dumps(evt)}\n\n".encode()
                     yield payload
@@ -2145,7 +2122,6 @@ idle_state: dict[str, Any] = {
     "resources": 0,
     "rules_version": 1,
 }
-_last_activity_ts = time.time()
 IDLE_BACKGROUND_INTERVAL = int(os.getenv("IDLE_BACKGROUND_INTERVAL","30"))  # seconds between checks
 IDLE_INACTIVITY_THRESHOLD = int(os.getenv("IDLE_INACTIVITY_THRESHOLD","120"))  # seconds idle before auto tick
 
@@ -2227,7 +2203,8 @@ async def _idle_background_loop():
     while True:
         try:
             now = time.time()
-            if now - _last_activity_ts > IDLE_INACTIVITY_THRESHOLD:
+            last_activity = get_last_activity()
+            if now - last_activity > IDLE_INACTIVITY_THRESHOLD:
                 try:
                     idle_state["tick"] += 1
                     idle_state["resources"] += 1
