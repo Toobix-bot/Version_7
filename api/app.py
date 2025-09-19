@@ -1926,8 +1926,23 @@ async def healthz() -> dict[str, str]:
 
 
 @app.get("/events")
-async def events_stream(request: Request, agent: str = Depends(require_auth), kinds: str | None = Query(default=None)) -> StreamingResponse:  # type: ignore[override]
-    rate_limit(agent)
+async def events_stream(
+    request: Request,
+    kinds: str | None = Query(default=None),
+    key: str | None = Query(default=None),
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> StreamingResponse:  # type: ignore[override]
+    """SSE stream; accepts auth via X-API-Key header or query parameter `key`.
+
+    EventSource cannot set custom headers, so we support `?key=...` for the Beta UI.
+    """
+    # auth (kill switch + token check)
+    if KILL_SWITCH.lower() == "on":
+        raise _error("kill_switch", "Service disabled", 503)
+    token = x_api_key or key
+    if not token or token not in API_TOKENS:
+        raise _error("invalid_api_key", "X-API-Key invalid (use header or ?key=)", 401)
+    rate_limit("sse")
     heartbeat_interval = float(os.getenv("SSE_HEARTBEAT_INTERVAL", "15"))
     poll_timeout = float(os.getenv("SSE_POLL_TIMEOUT", "1"))
     allowed: set[str] | None = None
@@ -2544,8 +2559,8 @@ const btnPlanPR=document.getElementById('btnPlanPR'); if(btnPlanPR){ btnPlanPR.o
 // Policies UI
 async function loadPolicyCurrent(){ try{ const cur=await fetchJSON('/policy/current'); const pre=document.getElementById('policyCurrent'); if(pre){ pre.textContent = JSON.stringify(cur,null,2); } }catch(_){ const pre=document.getElementById('policyCurrent'); if(pre){ pre.textContent='Fehler beim Laden'; pre.style.color='#ef4444'; } }}
 async function doPolicyReload(){ try{ await fetchJSON('/policy/reload',{method:'POST', body: JSON.stringify({})}); document.getElementById('policyInfo').textContent='reload ok'; setTimeout(()=>document.getElementById('policyInfo').textContent='',1200); await loadPolicyCurrent(); }catch(_){ document.getElementById('policyInfo').textContent='reload fehler'; }}
-async function doPolicyDryRun(){ try{ const y=document.getElementById('policyYaml').value||''; const r=await fetchJSON('/policy/dry-run',{method:'POST', body: JSON.stringify({yaml:y})}); document.getElementById('policyInfo').textContent = (r&&r.status)||'dry-run ok'; setTimeout(()=>document.getElementById('policyInfo').textContent='',1200); }catch(_){ document.getElementById('policyInfo').textContent='dry-run fehler'; }}
-async function doPolicyApply(){ try{ const y=document.getElementById('policyYaml').value||''; const r=await fetchJSON('/policy/apply',{method:'POST', body: JSON.stringify({yaml:y})}); document.getElementById('policyInfo').textContent = (r&&r.status)||'apply ok'; setTimeout(()=>document.getElementById('policyInfo').textContent='',1200); await loadPolicyCurrent(); }catch(_){ document.getElementById('policyInfo').textContent='apply fehler'; }}
+async function doPolicyDryRun(){ try{ const y=document.getElementById('policyYaml').value||''; const r=await fetchJSON('/policy/dry-run',{method:'POST', body: JSON.stringify({content:y})}); document.getElementById('policyInfo').textContent = (r&&r.status)||'dry-run ok'; setTimeout(()=>document.getElementById('policyInfo').textContent='',1200); }catch(_){ document.getElementById('policyInfo').textContent='dry-run fehler'; }}
+async function doPolicyApply(){ try{ const y=document.getElementById('policyYaml').value||''; const r=await fetchJSON('/policy/apply',{method:'POST', body: JSON.stringify({content:y})}); document.getElementById('policyInfo').textContent = (r&&r.status)||'apply ok'; setTimeout(()=>document.getElementById('policyInfo').textContent='',1200); await loadPolicyCurrent(); }catch(_){ document.getElementById('policyInfo').textContent='apply fehler'; }}
 const btnPolReload=document.getElementById('btnPolicyReload'); if(btnPolReload){ btnPolReload.onclick=doPolicyReload; }
 const btnPolDry=document.getElementById('btnPolicyDryRun'); if(btnPolDry){ btnPolDry.onclick=doPolicyDryRun; }
 const btnPolApply=document.getElementById('btnPolicyApply'); if(btnPolApply){ btnPolApply.onclick=doPolicyApply; }
@@ -2577,7 +2592,8 @@ let es; let esRetry=0; const maxRetry=10; const statusEl=document.getElementById
 function sseSet(st, color){ if(statusEl){ statusEl.textContent='[SSE: '+st+']'; statusEl.style.color=color||'#888'; } const nav=document.getElementById('navSSE'); if(nav){ nav.textContent='SSE: '+st; } const ds=document.getElementById('dashSse'); if(ds){ ds.textContent = st; } }
 function startSSE(){
     try{ if(es){ es.close(); }
-        es = new EventSource('/events',{withCredentials:false});
+    const sseUrl = '/events' + (apiKey? ('?key='+encodeURIComponent(apiKey)) : '');
+    es = new EventSource(sseUrl,{withCredentials:false});
         sseSet('verbunden','#10b981'); esRetry=0;
         es.addEventListener('open',()=>sseSet('offen','#10b981'));
         es.onmessage=()=>{};
