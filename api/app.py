@@ -17,7 +17,7 @@ from .routes import help as help_routes
 from .routes import advisor as advisor_routes
 from .routes import templates as templates_routes
 
-from fastapi import FastAPI, Depends, HTTPException, status, Request, Header, Body, Query
+from fastapi import FastAPI, Depends, HTTPException, status, Request, Header, Body, Query, Response
 from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, PlainTextResponse, RedirectResponse, HTMLResponse
@@ -27,6 +27,9 @@ from pydantic import BaseModel
 from prometheus_client import Counter, Histogram, CollectorRegistry, generate_latest, CONTENT_TYPE_LATEST  # type: ignore
 from prometheus_client import Gauge  # type: ignore
 import yaml
+import secrets
+import hashlib
+from hmac import compare_digest
 from policy.loader import load_policy
 from policy.model import Policy
 from policy.opa_gate import opa_allow
@@ -142,15 +145,18 @@ def custom_openapi():  # type: ignore
         comps['ApiKeyHeader'] = {"type": "apiKey", "in": "header", "name": "X-API-Key"}
     schema['security'] = [{"ApiKeyHeader": []}]
     # Iterate paths for request/response schema hardening
-    paths = schema.get('paths', {})
+    from typing import cast as _cast
+    paths = _cast(dict[str, Any], schema.get('paths', {}))
     for pth, methods in list(paths.items()):
         for method, op in list(methods.items()):
             if not isinstance(op, dict):
                 continue
+            opd = _cast(dict[str, Any], op)
             # 3a) Shape /policy/reload requestBody into object { path?: string }
-            if pth == "/policy/reload" and "requestBody" in op:
+            if pth == "/policy/reload" and "requestBody" in opd:
                 try:
-                    content = op["requestBody"].get("content", {})
+                    req_body = _cast(dict[str, Any], opd.get("requestBody", {}))
+                    content = _cast(dict[str, Any], req_body.get("content", {}))
                     if "application/json" in content:
                         content["application/json"]["schema"] = {
                             "type": "object",
@@ -161,9 +167,9 @@ def custom_openapi():  # type: ignore
                 except Exception:
                     pass
             # 3b) Harden 200 (and other) object responses lacking properties/additionalProperties
-            responses = cast(dict[str, Any], op.get("responses", {}))
+            responses = _cast(dict[str, Any], opd.get("responses", {}))
             for _, resp in responses.items():
-                content = cast(dict[str, Any], resp.get("content", {}) if isinstance(resp, dict) else {})
+                content = _cast(dict[str, Any], resp.get("content", {}) if isinstance(resp, dict) else {})
                 for _, c in content.items():
                     sch = c.get("schema") if isinstance(c, dict) else None  # type: ignore[index]
                     if isinstance(sch, dict) and sch.get("type") == "object":
@@ -313,6 +319,9 @@ THOUGHT_CATEGORY_TOTAL = Counter("thought_category_total", "Thoughts per categor
 QUEST_COMPLETED_TOTAL = Counter("quest_completed_total", "Completed quests", registry=REGISTRY)
 STORY_EVENTS_TOTAL = Counter("story_events_total", "Story events count", ["kind"], registry=REGISTRY)
 STORY_OPTIONS_OPEN = Gauge("story_options_open", "Offene Story Optionen", registry=REGISTRY)
+STORY_DECISIONS_TOTAL = Counter("story_decisions_total", "Story decisions taken", registry=REGISTRY)
+STORY_BADGES_AWARDED_TOTAL = Counter("story_badges_awarded_total", "Badges awarded in story", registry=REGISTRY)
+RANDOM_EVENTS_TOTAL = Counter("random_events_total", "Random world events emitted", registry=REGISTRY)
 PLAN_VARIANT_GENERATED_TOTAL = Counter(
     "plan_variant_generated_total",
     "Generated plan variants",
@@ -328,6 +337,167 @@ INSP_SOFT_CAP = int(os.getenv("STORY_INSP_SOFT_CAP", "150"))
 INSP_MIN_ENERGY = int(os.getenv("STORY_INSP_MIN_ENERGY", "10"))
 
 RISK_PATTERNS = [r"\b(os\.system|subprocess\.)", r"\.\./", r"/etc/passwd", r"\b(?:ssh|https?|ftp)://", r"(?i)api[_-]?key", r"(?i)\b(token|secret)\b"]
+
+# Allowed voices for narrator
+VOICES: list[str] = ["mentorisch", "humorvoll", "kritisch", "poetisch", "episch"]
+
+# ---------------- Users / Auth constants ------------------
+SESSION_COOKIE = os.getenv("SESSION_COOKIE", "session_id")
+SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "604800"))  # 7 days default
+ROLE_LEVELS: dict[str, int] = {"beginner": 1, "advanced": 2, "pro": 3, "anfänger": 1, "fortgeschritten": 2, "profi": 3}
+
+# --------------- Auth / Users models ----------------------
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+class UserOut(BaseModel):
+    id: int
+    email: str
+
+class SettingsOut(BaseModel):
+    role: str | None = None
+    mode: str | None = None
+    theme: str | None = None
+    density: str | None = None
+    toggles: dict[str, bool] | None = None
+    is_public: bool | None = None
+
+class SettingsPatch(BaseModel):
+    role: str | None = None
+    mode: str | None = None
+    theme: str | None = None
+    density: str | None = None
+    toggles: dict[str, bool] | None = None
+    is_public: bool | None = None
+
+# --------------- Auth helpers -----------------------------
+def _normalize_role(v: str | None) -> str | None:
+    if not v:
+        return None
+    v2 = v.strip().lower()
+    mapping = {"anfänger": "beginner", "fortgeschritten": "advanced", "profi": "pro"}
+    return mapping.get(v2, v2)
+
+def _hash_password(password: str, salt: str) -> str:
+    # PBKDF2-HMAC-SHA256 with sufficient iterations
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 200_000)
+    return dk.hex()
+
+def _create_user(email: str, password: str) -> int:
+    _ensure_db()
+    now = time.time()
+    salt = secrets.token_hex(16)
+    pw_hash = _hash_password(password, salt)
+    cur = db_conn.execute("INSERT INTO users(email,pw_hash,pw_salt,created_at) VALUES (?,?,?,?)", (email.strip().lower(), pw_hash, salt, now))  # type: ignore[arg-type]
+    user_id = int(cur.lastrowid)
+    # default settings
+    db_conn.execute("INSERT OR IGNORE INTO user_settings(user_id, role, mode, theme, density, toggles, is_public) VALUES (?,?,?,?,?,?,?)", (user_id, "beginner", "productive", "system", "comfy", json.dumps({}), 0))  # type: ignore[arg-type]
+    db_conn.commit()
+    return user_id
+
+def _verify_password(password: str, salt: str, pw_hash: str) -> bool:
+    calc = _hash_password(password, salt)
+    return compare_digest(calc, pw_hash)
+
+def _create_session(user_id: int) -> str:
+    _ensure_db()
+    sid = secrets.token_urlsafe(32)
+    now = time.time()
+    exp = now + SESSION_TTL_SECONDS
+    db_conn.execute("INSERT INTO sessions(id,user_id,created_at,expires_at) VALUES (?,?,?,?)", (sid, user_id, now, exp))  # type: ignore[arg-type]
+    db_conn.commit()
+    return sid
+
+def _delete_session(session_id: str) -> None:
+    try:
+        db_conn.execute("DELETE FROM sessions WHERE id=?", (session_id,))  # type: ignore[arg-type]
+        db_conn.commit()
+    except Exception:
+        pass
+
+def _get_user_by_session(req: Request) -> tuple[dict[str, Any], dict[str, Any]] | tuple[None, None]:
+    _ensure_db()
+    sid = req.cookies.get(SESSION_COOKIE)
+    if not sid:
+        return None, None
+    try:
+        row = db_conn.execute("SELECT user_id, expires_at FROM sessions WHERE id=?", (sid,)).fetchone()  # type: ignore[arg-type]
+        if not row:
+            return None, None
+        user_id, exp = row
+        if float(exp) < time.time():
+            _delete_session(sid)
+            return None, None
+        # load user
+        urow = db_conn.execute("SELECT id,email FROM users WHERE id=?", (user_id,)).fetchone()  # type: ignore[arg-type]
+        if not urow:
+            return None, None
+        srow = db_conn.execute("SELECT role,mode,theme,density,toggles,is_public FROM user_settings WHERE user_id=?", (user_id,)).fetchone()  # type: ignore[arg-type]
+        settings: dict[str, Any] = {"role": None, "mode": None, "theme": None, "density": None, "toggles": {}, "is_public": False}
+        if srow:
+            role, mode, theme, density, toggles_json, is_public = srow
+            try:
+                toggles = json.loads(toggles_json) if toggles_json else {}
+            except Exception:
+                toggles = {}
+            settings = {
+                "role": role,
+                "mode": mode,
+                "theme": theme,
+                "density": density,
+                "toggles": toggles,
+                "is_public": bool(is_public or 0),
+            }
+        user = {"id": int(urow[0]), "email": str(urow[1])}
+        return user, settings
+    except Exception:
+        return None, None
+
+async def get_current_user(req: Request) -> dict[str, Any] | None:
+    user, _ = _get_user_by_session(req)
+    return user
+
+async def require_session(req: Request) -> dict[str, Any]:
+    user, _ = _get_user_by_session(req)
+    if not user:
+        raise HTTPException(status_code=401, detail={"error": {"code": "unauthenticated", "message": "Login required"}})
+    return user
+
+def require_min_role(min_role: str):
+    min_lvl = ROLE_LEVELS.get(min_role, 1)
+    async def _dep(request: Request, x_api_key: str | None = Header(None)) -> str:
+        # API key always allowed (treated as highest privilege)
+        if x_api_key and x_api_key in API_TOKENS:
+            return "ok"
+        # else require session and role
+        user, settings = _get_user_by_session(request)
+        if not user:
+            raise HTTPException(status_code=401, detail={"error": {"code": "unauthenticated", "message": "Login required"}})
+        role = _normalize_role((settings or {}).get("role")) or "beginner"
+        lvl = ROLE_LEVELS.get(role, 1)
+        if lvl < min_lvl:
+            raise HTTPException(status_code=403, detail={"error": {"code": "forbidden", "message": f"requires role {min_role}+"}})
+        return "ok"
+    return _dep
+
+def require_auth_or_role(min_role: str):
+    """Pass if X-API-Key is valid OR session has role >= min_role."""
+    async def _dep(request: Request, x_api_key: str | None = Header(None)) -> str:
+        if x_api_key and x_api_key in API_TOKENS:
+            return "api-key"
+        user, settings = _get_user_by_session(request)
+        if not user:
+            raise HTTPException(status_code=401, detail={"error": {"code": "unauthenticated", "message": "Login required"}})
+        role = _normalize_role((settings or {}).get("role")) or "beginner"
+        if ROLE_LEVELS.get(role, 1) < ROLE_LEVELS.get(min_role, 1):
+            raise HTTPException(status_code=403, detail={"error": {"code": "forbidden", "message": f"requires role {min_role}+"}})
+        return "session"
+    return _dep
 
 # ---------------- Models ------------------
 class ActRequest(BaseModel):
@@ -388,6 +558,8 @@ class PRFromPlanRequest(BaseModel):
     risk_budget: str | None = None
     branch: str | None = None
     dry_run: bool | None = False
+    draft: bool | None = True
+    labels: list[str] | None = None
 
 class PRFromPlanResponse(BaseModel):
     status: str
@@ -413,6 +585,7 @@ class ChatResponse(BaseModel):
     model: str
     content: str
     usage: dict[str, Any] | None = None
+    persona: str | None = None
 
 # ---- Groq JSON Mode Wrapper (deterministic structured responses) ----
 class GroqJSONError(Exception):
@@ -810,20 +983,42 @@ def _story_tick(conn: sqlite3.Connection) -> StoryEvent:
 
 # ---------------- Story LLM Support -----------------
 async def _story_llm_generate(prompt: str, max_tokens: int = 120) -> str:
+    # read style settings
+    def _style() -> tuple[str, float, str | None]:
+        try:
+            cur = db_conn.execute("SELECT value FROM story_settings WHERE key=?", ("style.tone",))  # type: ignore[arg-type]
+            row = cur.fetchone(); tone = row[0] if row else "knapper literarischer Erzähler"
+        except Exception:
+            tone = "knapper literarischer Erzähler"
+        try:
+            cur = db_conn.execute("SELECT value FROM story_settings WHERE key=?", ("style.temperature",))  # type: ignore[arg-type]
+            row = cur.fetchone(); temp = float(row[0]) if row and row[0] is not None else 0.6
+        except Exception:
+            temp = 0.6
+        try:
+            cur = db_conn.execute("SELECT value FROM story_settings WHERE key=?", ("style.voice",))  # type: ignore[arg-type]
+            row = cur.fetchone(); voice = (row[0] if row else None)
+        except Exception:
+            voice = None
+        if temp < 0: temp = 0.0
+        if temp > 1: temp = 1.0
+        return tone, float(temp), (voice if voice in VOICES else None)
+    tone, temp, voice = _style()
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         return prompt.split("\n\n")[-1][:max_tokens]  # fallback simple
     try:
         from groq import Groq  # type: ignore
         client = Groq(api_key=api_key)
+        sys_voice = f" in einer {voice}-Stimme" if voice else ""
         resp = client.chat.completions.create(
             model=(current_policy.llm.model if (current_policy and getattr(current_policy, 'llm', None) and getattr(current_policy.llm,'model',None)) else "llama-3.3-70b-versatile"),
-            messages=[{"role":"system","content":"Du bist ein knapper literarischer Erzähler auf Deutsch."},{"role":"user","content": prompt}],
-            temperature=0.6,
+            messages=[{"role":"system","content":f"Du bist ein {tone}{sys_voice} auf Deutsch."},{"role":"user","content": prompt}],
+            temperature=temp,
             max_tokens=max_tokens,
         )
-        txt = resp.choices[0].message.content.strip()
-        return txt
+        txt = (resp.choices[0].message.content or "").strip()
+        return txt if txt else prompt.split("\n\n")[-1][:max_tokens]
     except Exception:
         return prompt.split("\n\n")[-1][:max_tokens]
 
@@ -837,6 +1032,38 @@ def _record_story_event(ev: StoryEvent) -> None:  # type: ignore[override]
                 STORY_OPTIONS_OPEN.set(int(cnt))
             except Exception:
                 pass
+    except Exception:
+        pass
+
+# --- Decision metrics and lightweight badges ---
+def _on_decision() -> None:
+    try:
+        STORY_DECISIONS_TOTAL.inc()
+    except Exception:
+        pass
+    try:
+        cur = db_conn.execute("SELECT value FROM story_settings WHERE key=?", ("stats.decisions",))  # type: ignore[arg-type]
+        row = cur.fetchone()
+        n = int(row[0]) if row and row[0] else 0
+    except Exception:
+        n = 0
+    n += 1
+    try:
+        db_conn.execute("INSERT OR REPLACE INTO story_settings(key,value) VALUES(?,?)", ("stats.decisions", str(n)))  # type: ignore[arg-type]
+        db_conn.commit()
+    except Exception:
+        pass
+    # award tiny badges at 1,5,10
+    try:
+        if n in (1,5,10):
+            label = {1:"Erste Entscheidung",5:"Erfahrener Entscheider",10:"Meister der Wege"}.get(n, f"Badge {n}")
+            db_conn.execute("INSERT INTO story_buffs(label,kind,magnitude,expires_at,meta) VALUES (?,?,?,?,?)",
+                            (label, "badge", 0, None, json.dumps({"badge": True, "count": n})))  # type: ignore[arg-type]
+            db_conn.commit()
+            STORY_BADGES_AWARDED_TOTAL.inc()
+            # fire events for UI
+            asyncio.create_task(emit_event("story.badge", {"label": label, "count": n}))
+            asyncio.create_task(emit_event("story.state", {"meta": "buffs"}))
     except Exception:
         pass
 
@@ -960,8 +1187,9 @@ def _persist_free_action(label: str) -> str:
     return oid
 
 @app.post("/story/advance", response_model=StoryEvent)
-async def story_advance(agent: str = Depends(require_auth)) -> StoryEvent:  # type: ignore[override]
+async def story_advance(agent: str = Depends(require_auth), force_random: int | None = Query(default=0)) -> StoryEvent:  # type: ignore[override]
     rate_limit(agent)
+    _ensure_db()
     ev = _story_tick(db_conn)  # type: ignore[arg-type]
     # decorate tick text via LLM
     st = _get_story_state(db_conn)  # type: ignore[arg-type]
@@ -970,6 +1198,11 @@ async def story_advance(agent: str = Depends(require_auth)) -> StoryEvent:  # ty
     _record_story_event(ev)
     await emit_event("story.event", ev.model_dump())
     await emit_event("story.state", {"epoch": ev.epoch})
+    # maybe emit a random event
+    try:
+        await _maybe_emit_random_event(force=bool(force_random))
+    except Exception:
+        pass
     return ev
 
 @app.post("/story/options/regen", response_model=list[StoryOption])
@@ -980,6 +1213,186 @@ async def story_options_regen(agent: str = Depends(require_auth)) -> list[StoryO
     STORY_OPTIONS_OPEN.set(len(opts))
     await emit_event("story.state", {"options": len(opts)})
     return opts
+
+# ---------------- Style + Branch Endpoints ----------------
+
+class StoryStylePatch(BaseModel):
+    tone: str | None = None
+    temperature: float | None = None
+    voice: str | None = None
+
+@app.patch("/story/style")
+async def story_style_patch(req: StoryStylePatch, agent: str = Depends(require_auth)) -> dict[str, Any]:  # type: ignore[override]
+    rate_limit(agent)
+    # load current
+    def _cur() -> tuple[str, float, str | None]:
+        try:
+            row = db_conn.execute("SELECT value FROM story_settings WHERE key=?", ("style.tone",)).fetchone()  # type: ignore[arg-type]
+            tone = row[0] if row else "knapper literarischer Erzähler"
+        except Exception:
+            tone = "knapper literarischer Erzähler"
+        try:
+            row = db_conn.execute("SELECT value FROM story_settings WHERE key=?", ("style.temperature",)).fetchone()  # type: ignore[arg-type]
+            temp = float(row[0]) if row and row[0] is not None else 0.6
+        except Exception:
+            temp = 0.6
+        try:
+            row = db_conn.execute("SELECT value FROM story_settings WHERE key=?", ("style.voice",)).fetchone()  # type: ignore[arg-type]
+            voice = row[0] if row else None
+        except Exception:
+            voice = None
+        return tone, float(temp), (voice if voice in VOICES else None)
+    tone, temp, voice = _cur()
+    if req.tone is not None:
+        tone = (req.tone or "").strip() or tone
+        try:
+            db_conn.execute("INSERT OR REPLACE INTO story_settings(key,value) VALUES(?,?)", ("style.tone", tone))  # type: ignore[arg-type]
+            db_conn.commit()
+        except Exception:
+            pass
+    if req.temperature is not None:
+        t = float(req.temperature)
+        if not (0.0 <= t <= 1.0):
+            raise HTTPException(status_code=400, detail={"error": {"code": "invalid_temperature", "message": "temperature must be between 0.0 and 1.0"}})
+        temp = t
+        try:
+            db_conn.execute("INSERT OR REPLACE INTO story_settings(key,value) VALUES(?,?)", ("style.temperature", str(temp)))  # type: ignore[arg-type]
+            db_conn.commit()
+        except Exception:
+            pass
+    # voice
+    if req.voice is not None:
+        v = (req.voice or "").strip().lower()
+        if v and v not in VOICES:
+            raise HTTPException(status_code=400, detail={"error": {"code": "invalid_voice", "message": f"voice must be one of {VOICES}"}})
+        voice = v if v in VOICES else None
+        try:
+            if voice:
+                db_conn.execute("INSERT OR REPLACE INTO story_settings(key,value) VALUES(?,?)", ("style.voice", voice))  # type: ignore[arg-type]
+            else:
+                db_conn.execute("DELETE FROM story_settings WHERE key=?", ("style.voice",))  # type: ignore[arg-type]
+            db_conn.commit()
+        except Exception:
+            pass
+    await emit_event("story.style", {"tone": tone, "temperature": temp, "voice": voice})
+    return {"status": "ok", "tone": tone, "temperature": temp, "voice": voice}
+
+@app.get("/story/style")
+async def story_style_get(agent: str = Depends(require_auth)) -> dict[str, Any]:  # type: ignore[override]
+    rate_limit(agent)
+    try:
+        row = db_conn.execute("SELECT value FROM story_settings WHERE key=?", ("style.tone",)).fetchone()  # type: ignore[arg-type]
+        tone = row[0] if row else "knapper literarischer Erzähler"
+    except Exception:
+        tone = "knapper literarischer Erzähler"
+    try:
+        row = db_conn.execute("SELECT value FROM story_settings WHERE key=?", ("style.temperature",)).fetchone()  # type: ignore[arg-type]
+        temp = float(row[0]) if row and row[0] is not None else 0.6
+    except Exception:
+        temp = 0.6
+    try:
+        row = db_conn.execute("SELECT value FROM story_settings WHERE key=?", ("style.voice",)).fetchone()  # type: ignore[arg-type]
+        voice = row[0] if row else None
+    except Exception:
+        voice = None
+    if voice not in VOICES:
+        voice = None
+    return {"tone": tone, "temperature": float(temp), "voice": voice}
+
+@app.get("/story/voices")
+async def story_voices(agent: str = Depends(require_auth)) -> list[str]:  # type: ignore[override]
+    rate_limit(agent)
+    return VOICES
+
+@app.post("/story/branch", response_model=StoryEvent)
+async def story_branch(req: StoryActionRequest, agent: str = Depends(require_auth)) -> StoryEvent:  # type: ignore[override]
+    return await story_action(req, agent)  # type: ignore[misc]
+
+# -------------- Random Events Config + Emission --------------
+
+def _rand_cfg() -> tuple[bool, float]:
+    enabled = True
+    prob = 0.15
+    try:
+        row = db_conn.execute("SELECT value FROM story_settings WHERE key=?", ("events.enabled",)).fetchone()  # type: ignore[arg-type]
+        if row and row[0] is not None:
+            enabled = (str(row[0]).lower() != "false")
+    except Exception:
+        pass
+    try:
+        row = db_conn.execute("SELECT value FROM story_settings WHERE key=?", ("events.prob",)).fetchone()  # type: ignore[arg-type]
+        if row and row[0] is not None:
+            prob = max(0.0, min(1.0, float(row[0])))
+    except Exception:
+        pass
+    return enabled, prob
+
+@app.get("/story/events/config")
+async def story_events_config_get(agent: str = Depends(require_auth)) -> dict[str, Any]:  # type: ignore[override]
+    rate_limit(agent)
+    _ensure_db()
+    enabled, prob = _rand_cfg()
+    return {"enabled": enabled, "prob": prob}
+
+class EventsConfigPatch(BaseModel):
+    enabled: bool | None = None
+    prob: float | None = None
+
+@app.patch("/story/events/config")
+async def story_events_config_patch(req: EventsConfigPatch, agent: str = Depends(require_auth)) -> dict[str, Any]:  # type: ignore[override]
+    rate_limit(agent)
+    _ensure_db()
+    enabled, prob = _rand_cfg()
+    if req.enabled is not None:
+        enabled = bool(req.enabled)
+        try:
+            db_conn.execute("INSERT OR REPLACE INTO story_settings(key,value) VALUES(?,?)", ("events.enabled", "true" if enabled else "false"))  # type: ignore[arg-type]
+            db_conn.commit()
+        except Exception:
+            pass
+    if req.prob is not None:
+        p = float(req.prob)
+        if not (0.0 <= p <= 1.0):
+            raise HTTPException(status_code=400, detail={"error": {"code": "invalid_prob", "message": "prob must be in [0,1]"}})
+        prob = p
+        try:
+            db_conn.execute("INSERT OR REPLACE INTO story_settings(key,value) VALUES(?,?)", ("events.prob", str(prob)))  # type: ignore[arg-type]
+            db_conn.commit()
+        except Exception:
+            pass
+    return {"status": "ok", "enabled": enabled, "prob": prob}
+
+async def _maybe_emit_random_event(force: bool = False) -> None:
+    import random
+    _ensure_db()
+    enabled, prob = _rand_cfg()
+    if not enabled and not force:
+        return
+    roll = random.random()
+    if force or roll < prob:
+        try:
+            st = _get_story_state(db_conn)  # type: ignore[arg-type]
+            # pick a small random effect
+            candidates = [
+                ("Ein externer Ping inspiriert dich.", {"inspiration": +3}, ["random","world","ping"]),
+                ("Ein Review bringt dich zum Grübeln.", {"wissen": +2, "energie": -1}, ["random","world","review"]),
+                ("Unerwartetes Lob hebt deinen Ruf.", {"ruf": +4}, ["random","world","praise"]),
+            ]
+            text, deltas, tags = random.choice(candidates)
+            # Apply deltas
+            for k,v in deltas.items():
+                st.resources[k] = st.resources.get(k,0) + int(v)
+            db_conn.execute("UPDATE story_state SET resources=?, ts=? WHERE id=1", (json.dumps(st.resources), _story_now()))  # type: ignore[arg-type]
+            db_conn.execute(
+                "INSERT INTO story_events(ts, epoch, kind, text, mood, deltas, tags, option_ref) VALUES (?,?,?,?,?,?,?,?)",
+                (_story_now(), st.epoch, "random", text, st.mood, json.dumps(deltas), json.dumps(tags), None),
+            )  # type: ignore[arg-type]
+            db_conn.commit()
+            RANDOM_EVENTS_TOTAL.inc()
+            await emit_event("story.event", {"kind":"random","text":text,"deltas":deltas,"tags":tags})
+            await emit_event("story.state", {"random": True})
+        except Exception:
+            pass
 
 # ---------------- Meta Resource Endpoints ----------------
 
@@ -1160,6 +1573,36 @@ def init_db() -> None:
             category TEXT,
             updated_at REAL NOT NULL
         );
+        -- Story settings
+        CREATE TABLE IF NOT EXISTS story_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        -- Users & Sessions
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL UNIQUE,
+            pw_hash TEXT NOT NULL,
+            pw_salt TEXT NOT NULL,
+            created_at REAL NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            created_at REAL NOT NULL,
+            expires_at REAL NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );
+        CREATE TABLE IF NOT EXISTS user_settings (
+            user_id INTEGER PRIMARY KEY,
+            role TEXT,
+            mode TEXT,
+            theme TEXT,
+            density TEXT,
+            toggles TEXT,
+            is_public INTEGER DEFAULT 0,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );
         -- Idle Quests table (progress tracking for idle game layer)
         CREATE TABLE IF NOT EXISTS idle_quests (
             id INTEGER PRIMARY KEY,
@@ -1205,9 +1648,10 @@ def init_db() -> None:
                 db_conn.execute("INSERT INTO story_skills(name,level,xp,category,updated_at) VALUES (?,?,?,?,?)", (name,lvl,xp,cat,time.time()))
         cur = db_conn.execute("SELECT COUNT(*) FROM story_buffs")
         if cur.fetchone()[0] == 0:
+            _now = time.time()
             buff_sets = [
-                [ ("klarheit","geist",5, now + 3600, {"beschreibung":"Gedanken sind geordnet"}), ("flow","tempo",3, now + 900, {"beschreibung":"Erhöhte kreative Durchsatzrate"}) ],
-                [ ("ruhe","regeneration",2, now + 1200, {"beschreibung":"Langsame Erholung"}) ]
+                [ ("klarheit","geist",5, _now + 3600, {"beschreibung":"Gedanken sind geordnet"}), ("flow","tempo",3, _now + 900, {"beschreibung":"Erhöhte kreative Durchsatzrate"}) ],
+                [ ("ruhe","regeneration",2, _now + 1200, {"beschreibung":"Langsame Erholung"}) ]
             ]
             for label,kind,mag,exp,meta in buff_sets[0]:
                 db_conn.execute("INSERT INTO story_buffs(label,kind,magnitude,expires_at,meta) VALUES (?,?,?,?,?)", (label,kind,mag,exp,json.dumps(meta)))
@@ -1244,6 +1688,97 @@ def load_policies() -> None:
 
 # update startup to load policies
 ## (startup handler removed in favor of lifespan context)
+
+# ---------------- Users / Auth Endpoints ------------------
+
+@app.post("/auth/register")
+async def auth_register(req: RegisterRequest) -> dict[str, Any]:
+    _ensure_db()
+    email = (req.email or "").strip().lower()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail={"error": {"code": "invalid_email", "message": "invalid email"}})
+    if not req.password or len(req.password) < 6:
+        raise HTTPException(status_code=400, detail={"error": {"code": "weak_password", "message": "password too short"}})
+    # prevent duplicates
+    row = db_conn.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone()  # type: ignore[arg-type]
+    if row:
+        raise HTTPException(status_code=409, detail={"error": {"code": "email_exists", "message": "email already registered"}})
+    uid = _create_user(email, req.password)
+    return {"user": {"id": uid, "email": email}}
+
+@app.post("/auth/login")
+async def auth_login(req: LoginRequest, response: Response) -> dict[str, Any]:
+    _ensure_db()
+    email = (req.email or "").strip().lower()
+    row = db_conn.execute("SELECT id,pw_hash,pw_salt FROM users WHERE email=?", (email,)).fetchone()  # type: ignore[arg-type]
+    if not row:
+        raise HTTPException(status_code=401, detail={"error": {"code": "invalid_credentials", "message": "invalid credentials"}})
+    uid, pw_hash, pw_salt = row
+    if not _verify_password(req.password or "", str(pw_salt), str(pw_hash)):
+        raise HTTPException(status_code=401, detail={"error": {"code": "invalid_credentials", "message": "invalid credentials"}})
+    sid = _create_session(int(uid))
+    # cookie flags; in dev HTTPS may be absent so Secure can be off via env if needed later
+    response.set_cookie(key=SESSION_COOKIE, value=sid, httponly=True, samesite="lax", path="/")
+    # load settings
+    _, settings = _get_user_by_session(Request({"type":"http" , "headers": [] , "cookies": {SESSION_COOKIE: sid}}))
+    return {"user": {"id": int(uid), "email": email}, "settings": settings}
+
+@app.post("/auth/logout")
+async def auth_logout(request: Request, response: Response) -> dict[str, Any]:  # type: ignore[override]
+    _ensure_db()
+    sid = request.cookies.get(SESSION_COOKIE)
+    if sid:
+        _delete_session(sid)
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return {"status": "logged_out"}
+
+@app.get("/me")
+async def me(request: Request) -> dict[str, Any]:  # type: ignore[override]
+    _ensure_db()
+    user, settings = _get_user_by_session(request)
+    if not user:
+        raise HTTPException(status_code=401, detail={"error": {"code": "unauthenticated", "message": "Login required"}})
+    return {"user": user, "settings": settings}
+
+@app.get("/me/settings")
+async def me_settings(request: Request) -> dict[str, Any]:  # type: ignore[override]
+    _ensure_db()
+    user, settings = _get_user_by_session(request)
+    if not user:
+        raise HTTPException(status_code=401, detail={"error": {"code": "unauthenticated", "message": "Login required"}})
+    return settings
+
+@app.patch("/me/settings")
+async def me_settings_patch(req: SettingsPatch, request: Request) -> dict[str, Any]:  # type: ignore[override]
+    _ensure_db()
+    user, settings = _get_user_by_session(request)
+    if not user:
+        raise HTTPException(status_code=401, detail={"error": {"code": "unauthenticated", "message": "Login required"}})
+    uid = int(user["id"])  # type: ignore[index]
+    # validate & normalize
+    role = _normalize_role(req.role) if req.role is not None else settings.get("role")
+    if role is not None and role not in ("beginner","advanced","pro"):
+        raise HTTPException(status_code=400, detail={"error": {"code": "invalid_role", "message": "role must be beginner|advanced|pro"}})
+    mode = req.mode if req.mode is not None else settings.get("mode")
+    if mode is not None and mode not in ("productive","creative","playful"):
+        raise HTTPException(status_code=400, detail={"error": {"code": "invalid_mode", "message": "mode must be productive|creative|playful"}})
+    theme = req.theme if req.theme is not None else settings.get("theme")
+    if theme is not None and theme not in ("light","dark","system"):
+        raise HTTPException(status_code=400, detail={"error": {"code": "invalid_theme", "message": "theme must be light|dark|system"}})
+    density = req.density if req.density is not None else settings.get("density")
+    if density is not None and density not in ("comfy","compact"):
+        raise HTTPException(status_code=400, detail={"error": {"code": "invalid_density", "message": "density must be comfy|compact"}})
+    toggles = req.toggles if req.toggles is not None else settings.get("toggles") or {}
+    if toggles is not None and not isinstance(toggles, dict):
+        raise HTTPException(status_code=400, detail={"error": {"code": "invalid_toggles", "message": "toggles must be an object"}})
+    is_public = bool(req.is_public) if req.is_public is not None else bool(settings.get("is_public", False))
+    db_conn.execute(
+        "INSERT INTO user_settings(user_id, role, mode, theme, density, toggles, is_public) VALUES (?,?,?,?,?,?,?)\n         ON CONFLICT(user_id) DO UPDATE SET role=excluded.role, mode=excluded.mode, theme=excluded.theme, density=excluded.density, toggles=excluded.toggles, is_public=excluded.is_public",
+        (uid, role, mode, theme, density, json.dumps(toggles or {}), 1 if is_public else 0),
+    )  # type: ignore[arg-type]
+    db_conn.commit()
+    new_settings = {"role": role, "mode": mode, "theme": theme, "density": density, "toggles": toggles or {}, "is_public": is_public}
+    return new_settings
 
 # ---------------- Security ------------------
 API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -1439,32 +1974,36 @@ async def metrics() -> PlainTextResponse:
 async def story_ui() -> HTMLResponse:  # type: ignore[override]
         html = """<!DOCTYPE html><html lang=de><head><meta charset=utf-8><title>Story</title>
 <style>
-body{font-family:system-ui,Segoe UI,Arial,sans-serif;margin:16px;background:#0f1115;color:#f2f2f2}
-section{margin-bottom:18px;padding:12px;background:#1b1f27;border:1px solid #2c333f;border-radius:8px}
+/* Design Tokens: Theme & Palette */
+:root{ --bg:#0f1115; --fg:#f2f2f2; --panel:#1b1f27; --border:#2c333f; --muted:#9ca3af; --accent:#2563eb; --accent-2:#374151; --chip:#1f2937; --chip-fg:#fff; --warn:#f59e0b; --ok:#10b981;
+    --primary-h:210; --secondary-h:330; }
+[data-theme="light"]{ --bg:#f8fafc; --fg:#0f172a; --panel:#ffffff; --border:#e2e8f0; --muted:#475569; --accent:#2563eb; --accent-2:#e5e7eb; --chip:#e5e7eb; --chip-fg:#0f172a }
+body{font-family:system-ui,Segoe UI,Arial,sans-serif;margin:16px;background:var(--bg);color:var(--fg)}
+section{margin-bottom:18px;padding:12px;background:var(--panel);border:1px solid var(--border);border-radius:8px}
 h2{margin:4px 0 12px;font-size:18px}
-button{background:#2563eb;color:#fff;border:0;padding:6px 12px;margin:4px 4px 4px 0;border-radius:4px;cursor:pointer;font-size:13px}
-button.secondary{background:#374151}
+button{background:hsl(var(--primary-h),80%,52%);color:#fff;border:0;padding:6px 12px;margin:4px 4px 4px 0;border-radius:6px;cursor:pointer;font-size:13px}
+button.secondary{background:var(--accent-2);color:var(--fg)}
 code{font-size:12px;background:#111722;padding:2px 4px;border-radius:4px;white-space:pre-wrap;word-break:break-word}
 .opts button{display:block;width:100%;text-align:left;position:relative}
 .opts button{white-space:normal;word-break:break-word;overflow-wrap:anywhere}
 .opts button.levelup{border:1px solid #f59e0b;background:#92400e}
-.opts button .risk{position:absolute;right:6px;top:6px;font-size:10px;padding:2px 5px;border-radius:10px;background:#374151;color:#fff;opacity:.85}
+.opts button .risk{position:absolute;right:6px;top:6px;font-size:10px;padding:2px 5px;border-radius:10px;background:var(--accent-2);color:#fff;opacity:.85}
 .opts button .risk.r0{background:#059669}
 .opts button .risk.r1{background:#2563eb}
 .opts button .risk.r2{background:#d97706}
 .opts button .risk.r3{background:#dc2626}
-.badge{display:inline-block;margin-left:6px;padding:1px 4px;font-size:10px;border-radius:4px;background:#1f2937;color:#fff}
-.badge.level{background:#f59e0b;color:#000}
-.badge.insp{background:#ec4899}
+.badge{display:inline-block;margin-left:6px;padding:1px 4px;font-size:10px;border-radius:4px;background:var(--chip);color:var(--chip-fg)}
+.badge.level{background:var(--warn);color:#000}
+.badge.insp{background:hsl(calc(var(--secondary-h)),80%,60%)}
 .log-item{margin:0 0 4px;line-height:1.25;word-break:break-word;overflow-wrap:anywhere}
-.kind-action{color:#10b981}.kind-tick{color:#9ca3af}.kind-arc_shift{color:#f59e0b}
+.kind-action{color:var(--ok)}.kind-tick{color:var(--muted)}.kind-arc_shift{color:var(--warn)}
 .flex{display:flex;gap:16px;flex-wrap:wrap}
 .col{flex:1 1 300px;min-width:280px}
-input[type=text]{width:100%;padding:6px;background:#111722;color:#fff;border:1px solid #2c333f;border-radius:4px}
+input[type=text]{width:100%;padding:6px;background:#111722;color:#fff;border:1px solid var(--border);border-radius:4px}
 .res-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;margin-top:8px}
 .res{background:#111722;padding:6px;border:1px solid #2a3140;border-radius:6px;font-size:11px}
 .bar{height:6px;border-radius:3px;background:#222;margin-top:4px;overflow:hidden;position:relative}
-.bar span{display:block;height:100%;background:linear-gradient(90deg,#2563eb,#38bdf8)}
+.bar span{display:block;height:100%;background:linear-gradient(90deg,hsl(var(--primary-h),80%,45%),hsl(var(--primary-h),80%,60%))}
 .res[data-k="energie"] .bar span{background:linear-gradient(90deg,#f59e0b,#fbbf24)}
 .res[data-k="wissen"] .bar span{background:linear-gradient(90deg,#6366f1,#8b5cf6)}
 .res[data-k="inspiration"] .bar span{background:linear-gradient(90deg,#ec4899,#f472b6)}
@@ -1474,8 +2013,195 @@ input[type=text]{width:100%;padding:6px;background:#111722;color:#fff;border:1px
 .res[data-k="level"] .bar span{background:linear-gradient(90deg,#ef4444,#f87171)}
 /* safer text wrapping across panels incl. help overlay */
 #stateBox,#logBox,#companionsBox,#buffsBox,#skillsBox,#helpOverlay,#helpOverlay *{word-break:break-word;overflow-wrap:anywhere}
+/* ensure general panel content doesn't overflow */
+section, section * { word-break: break-word; overflow-wrap: anywhere }
 </style></head><body>
-<h1>Story <small id=sseStatus style='font-size:12px;color:#888'>[SSE: init]</small> <small id=keyStatus style='font-size:12px;color:#888;margin-left:8px'>[Key: ?]</small></h1>
+<h1>Story
+    <small id=sseStatus style='font-size:12px;color:#888'>[SSE: init]</small>
+    <small id=keyStatus style='font-size:12px;color:#888;margin-left:8px'>[Key: ?]</small>
+    <small id=metaStatus style='font-size:12px;color:#888;margin-left:8px'>[meta: ?]</small>
+    <small id=llmStatus style='font-size:12px;color:#888;margin-left:8px'>[llm: ?]</small>
+    <small id=policyStatus style='font-size:12px;color:#888;margin-left:8px'>[policy: ?]</small>
+    <small id=pubStatus style='font-size:12px;color:#888;margin-left:8px'>[privat]</small>
+</h1>
+<div id="topNav" style="display:flex;justify-content:space-between;align-items:center;margin:8px 0 12px 0;gap:12px;flex-wrap:wrap">
+    <div>
+        <button id="navBtnDashboard" class="secondary">Dashboard</button>
+        <button id="navBtnStory" class="secondary">Story</button>
+    <button id="navBtnSuggestions" class="secondary">Suggestions</button>
+    <button id="navBtnPlanPR" class="secondary">Plan → PR</button>
+    <button id="navBtnPolicies" class="secondary">Policies</button>
+    </div>
+    <div style="font-size:12px;color:var(--muted)">
+        <span id="navSSE" class="badge">SSE: ?</span>
+        <span id="navMetrics" class="badge">/metrics: ?</span>
+        <span id="navSug" class="badge">Vorschläge: ?</span>
+    </div>
+</div>
+<section id="accountSec" style="margin-top:8px;display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
+    <div id="authBox" style="display:flex;gap:8px;align-items:end;flex-wrap:wrap">
+        <div>
+            <label style="font-size:12px;display:block">E-Mail
+                <input id="authEmail" type="email" placeholder="you@example.com" style="min-width:200px" />
+            </label>
+        </div>
+        <div>
+            <label style="font-size:12px;display:block">Passwort
+                <input id="authPass" type="password" placeholder="••••••" style="min-width:160px" />
+            </label>
+        </div>
+        <div>
+            <button id="btnLogin">Login</button>
+            <button id="btnRegister" class="secondary">Registrieren</button>
+        </div>
+    </div>
+    <div id="userBox" style="display:none;gap:8px;align-items:center">
+        <span id="userInfo" style="font-size:12px;color:#9ca3af"></span>
+        <button id="btnLogout" class="secondary">Logout</button>
+    </div>
+    <div id="viewSettings" style="display:none;border-left:1px solid var(--border);padding-left:12px">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <label style="font-size:12px">Rolle
+                <select id="setRole" style="margin-left:6px;background:#111722;color:#fff;border:1px solid #2c333f;border-radius:4px;padding:4px 6px;min-width:140px">
+                    <option value="beginner">Anfänger</option>
+                    <option value="advanced">Fortgeschritten</option>
+                    <option value="pro">Profi</option>
+                </select>
+            </label>
+            <label style="font-size:12px">Modus
+                <select id="setMode" style="margin-left:6px;background:#111722;color:#fff;border:1px solid #2c333f;border-radius:4px;padding:4px 6px;min-width:140px">
+                    <option value="productive">Produktiv</option>
+                    <option value="creative">Kreativ</option>
+                    <option value="playful">Spielerisch</option>
+                </select>
+            </label>
+            <label style="font-size:12px">Theme
+                <select id="setTheme" style="margin-left:6px;background:#111722;color:#fff;border:1px solid var(--border);border-radius:4px;padding:4px 6px;min-width:120px">
+                    <option value="system">System</option>
+                    <option value="light">Hell</option>
+                    <option value="dark" selected>Dunkel</option>
+                </select>
+            </label>
+            <label style="font-size:12px">Dichte
+                <select id="setDensity" style="margin-left:6px;background:#111722;color:#fff;border:1px solid #2c333f;border-radius:4px;padding:4px 6px;min-width:120px">
+                    <option value="comfy" selected>Komfort</option>
+                    <option value="compact">Kompakt</option>
+                </select>
+            </label>
+            <label style="font-size:12px"><input type="checkbox" id="setPublic" /> Öffentlich</label>
+            <button id="btnSaveView" class="secondary">Speichern</button>
+            <small id="viewInfo" style="color:#9ca3af"></small>
+        </div>
+        <div style="margin-top:8px;display:flex;gap:12px;flex-wrap:wrap;align-items:center">
+            <strong style="font-size:12px;color:var(--muted)">Farben</strong>
+            <label style="font-size:12px">Primär <input id="huePrimary" type="range" min="0" max="360" step="1" value="210"></label>
+            <label style="font-size:12px">Sekundär <input id="hueSecondary" type="range" min="0" max="360" step="1" value="330"></label>
+            <label style="font-size:12px"><input id="hueRotate" type="checkbox"> Drehen</label>
+            <button id="btnApplyPalette" class="secondary">Farben anwenden</button>
+        </div>
+    </div>
+</section>
+<section id="paneDashboard" style="display:none">
+    <h2>Dashboard</h2>
+    <div style="display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(260px,1fr))">
+        <div class="card" style="padding:10px;background:var(--panel);border:1px solid var(--border);border-radius:8px">
+            <strong>Health</strong>
+            <div style="margin-top:6px">
+                <div>SSE-Status: <span id="dashSse" class="badge">?</span></div>
+                <div>/metrics: <span id="dashMetrics" class="badge">?</span></div>
+            </div>
+        </div>
+        <div class="card" style="padding:10px;background:var(--panel);border:1px solid var(--border);border-radius:8px">
+            <strong>Offene Vorschläge</strong>
+            <div id="dashSug" style="margin-top:6px;font-size:13px;color:var(--muted)">Lade…</div>
+        </div>
+        <div class="card" style="padding:10px;background:var(--panel);border:1px solid var(--border);border-radius:8px">
+            <strong>Letzte Story-Ereignisse</strong>
+            <div id="dashStory" style="margin-top:6px;font-size:12px;max-height:160px;overflow:auto"></div>
+        </div>
+    </div>
+</section>
+<section id="paneSuggestions" style="display:none">
+    <h2>Suggestions</h2>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin-bottom:8px">
+        <label style="font-size:12px;display:block">Ziel
+            <input id="sugGoal" type="text" placeholder="z. B. UI vereinfachen" style="min-width:260px" />
+        </label>
+        <button id="sugGenerate">Generieren</button>
+        <button id="sugRefresh" class="secondary">Aktualisieren</button>
+        <small id="sugInfo" style="color:#9ca3af"></small>
+    </div>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin:6px 0 10px">
+        <label style="font-size:12px">Status
+            <select id="sugFilterStatus" style="margin-left:6px;background:#111722;color:#fff;border:1px solid var(--border);border-radius:4px;padding:3px 6px">
+                <option value="all">alle</option>
+                <option value="draft">entwurf</option>
+                <option value="revised">überarbeitet</option>
+                <option value="approved">übernommen</option>
+            </select>
+        </label>
+        <label style="font-size:12px">Sortierung
+            <select id="sugSort" style="margin-left:6px;background:#111722;color:#fff;border:1px solid var(--border);border-radius:4px;padding:3px 6px">
+                <option value="newest">neueste zuerst</option>
+                <option value="oldest">älteste zuerst</option>
+            </select>
+        </label>
+        <label style="font-size:12px;display:block">Suche
+            <input id="sugSearch" type="text" placeholder="Ziel durchsuchen" style="min-width:200px" />
+        </label>
+    </div>
+    <div id="sugListPane" style="display:grid;gap:8px"></div>
+    <div id="sugDetail" style="margin-top:10px;font-size:13px;color:var(--muted)"></div>
+    <div id="sugActions" style="display:none;margin-top:8px">
+        <button id="sugApprove">Übernehmen</button>
+        <button id="sugReject" class="secondary">Ablehnen</button>
+    </div>
+</section>
+<section id="panePlanPR" style="display:none">
+    <h2>Plan → PR</h2>
+    <div id="planPRSection">
+        <input id="prIntent" placeholder="Intent (z. B. 'Health Endpoint hinzufügen')" />
+        <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+            <label style="font-size:12px">Risk:
+                <select id="prRisk" style="margin-left:4px;background:#111722;color:#fff;border:1px solid #2c333f;border-radius:4px;padding:4px">
+                    <option value="">auto</option>
+                    <option value="vorsichtig">vorsichtig</option>
+                    <option value="ausgewogen">ausgewogen</option>
+                    <option value="mutig">mutig</option>
+                </select>
+            </label>
+            <label style="font-size:12px"><input type="checkbox" id="prDry" checked /> Dry-Run</label>
+            <label style="font-size:12px"><input type="checkbox" id="prDraft" checked /> Draft-PR</label>
+            <button id="btnPlanPR">PR erstellen</button>
+        </div>
+        <div style="margin-top:6px;display:flex;gap:8px;align-items:center">
+            <input id="prLabels" placeholder="Labels (kommagetrennt)" style="flex:1" />
+        </div>
+        <div id="prResult" style="font-size:12px;margin-top:6px;color:#9ca3af;word-break:break-word;overflow-wrap:anywhere"></div>
+    </div>
+    <div style="font-size:12px;color:var(--muted);margin-top:8px">Hinweis: Für Anfänger-Rolle ist dieses Pane ausgeblendet.</div>
+    
+    
+</section>
+<section id="panePolicies" style="display:none">
+    <h2>Policies</h2>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+        <button id="btnPolicyReload" class="secondary">Reload</button>
+        <button id="btnPolicyDryRun">Dry-Run anwenden</button>
+        <button id="btnPolicyApply">Apply</button>
+        <small id="policyInfo" style="color:#9ca3af"></small>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:start">
+        <div>
+            <strong>Aktuelle Policy</strong>
+            <pre id="policyCurrent" style="background:#0b1220;border:1px solid var(--border);border-radius:8px;padding:8px;max-height:320px;overflow:auto"></pre>
+        </div>
+        <div>
+            <strong>YAML (Dry-Run/Apply)</strong>
+            <textarea id="policyYaml" placeholder="# YAML einfügen" style="width:100%;height:320px;background:#111722;color:#eee;border:1px solid var(--border);border-radius:8px;padding:8px"></textarea>
+        </div>
+    </div>
+</section>
 <div id="helpOverlay" style="position:fixed;right:16px;bottom:16px;z-index:9999;background:#111827;border:1px solid #374151;padding:12px 14px;width:300px;max-height:60vh;overflow:auto;border-radius:10px;box-shadow:0 4px 18px -2px #0009;font-size:12px;display:none">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
         <strong style="font-size:13px">Hilfe & Kontext</strong>
@@ -1491,13 +2217,39 @@ input[type=text]{width:100%;padding:6px;background:#111722;color:#fff;border:1px
     </div>
 </div>
 <button id="helpToggle" style="position:fixed;right:16px;bottom:16px;z-index:9998;background:#2563eb;border:none;color:#fff;padding:10px 14px;border-radius:50%;font-size:18px;cursor:pointer;box-shadow:0 4px 12px -2px #000a">?</button>
-<div class=flex>
+<div id="paneStory" style="display:block"><div class=flex>
  <div class=col>
     <section id=stateSec><h2>Zustand</h2><div id=stateBox>lade...</div>
         <div id=metaWrap style='margin-top:12px'>
             <details open><summary style='cursor:pointer'>Gefährten</summary><div id=companionsBox style='font-size:12px;margin-top:4px'></div></details>
             <details open><summary style='cursor:pointer'>Buffs</summary><div id=buffsBox style='font-size:12px;margin-top:4px'></div></details>
             <details open><summary style='cursor:pointer'>Skills</summary><div id=skillsBox style='font-size:12px;margin-top:4px'></div></details>
+        </div>
+    </section>
+    <section><h2>Stil & Ereignisse</h2>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+            <label style="font-size:12px;display:block">Ton
+                <input id=styleTone type=text placeholder="z. B. prägnanter Erzähler" />
+            </label>
+            <label style="font-size:12px;display:block">Temperatur (0.0–1.0)
+                <input id=styleTemp type=number min=0 max=1 step=0.1 />
+            </label>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+            <label style="font-size:12px">Stimme
+                <select id=styleVoice style="margin-left:6px;background:#111722;color:#fff;border:1px solid #2c333f;border-radius:4px;padding:4px 6px;min-width:160px"></select>
+            </label>
+            <button id=btnSaveStyle class=secondary>Stil speichern</button>
+            <small id=styleInfo style="color:#9ca3af"></small>
+        </div>
+        <div style="border-top:1px solid #2c333f;margin:8px 0"></div>
+        <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+            <label style="font-size:12px"><input type=checkbox id=evtEnabled /> Zufallsereignisse aktiv</label>
+            <label style="font-size:12px">Wahrscheinlichkeit
+                <input id=evtProb type=number min=0 max=1 step=0.05 style="width:80px;margin-left:6px" />
+            </label>
+            <button id=btnSaveEvents class=secondary>Ereignisse speichern</button>
+            <small id=eventsInfo style="color:#9ca3af"></small>
         </div>
     </section>
     <section><h2>Aktion</h2>
@@ -1507,6 +2259,7 @@ input[type=text]{width:100%;padding:6px;background:#111722;color:#fff;border:1px
         <button class=secondary id=btnAdvance>Zeit voranschreiten</button>
         <button class=secondary id=btnRegen>Optionen neu</button>
     </section>
+    
  </div>
  <div class=col>
         <section><h2>Log</h2>
@@ -1514,28 +2267,288 @@ input[type=text]{width:100%;padding:6px;background:#111722;color:#fff;border:1px
             <div id=logBox style="max-height:520px;overflow:auto;font-size:12px"></div>
         </section>
  </div>
-</div>
+</div></div>
 <script>
 const apiKey = localStorage.getItem('api_key') || prompt('API Key?'); if(apiKey) localStorage.setItem('api_key', apiKey);
+let currentPane='dashboard';
+function setPane(which){ try{
+    currentPane = which;
+    const ids=['paneDashboard','paneStory','paneSuggestions','panePlanPR','panePolicies'];
+    ids.forEach(id=>{ const el=document.getElementById(id); if(el){ el.style.display = (id.toLowerCase()===('pane'+which).toLowerCase() || (which==='story' && id==='paneStory') || (which==='dashboard' && id==='paneDashboard'))? 'block':'none'; }});
+}catch(_){}}
 const H = {'X-API-Key': apiKey};
 function j(el, html){document.getElementById(el).innerHTML=html}
+function escapeHtml(s){ try{ return String(s).replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c])); }catch(_){ return String(s); } }
 function fetchJSON(p,opt={}){opt.headers={...(opt.headers||{}),...H,'Content-Type':'application/json'};return fetch(p,opt).then(r=>{if(!r.ok) throw new Error(r.status); return r.json()})}
 function setKeyStatus(txt,color){ const el=document.getElementById('keyStatus'); if(el){ el.textContent='[Key: '+txt+']'; el.style.color=color||'#888'; } }
-async function checkAuth(){ try{ const r = await fetchJSON('/health/dev'); const mode = (r && r.auth_mode) ? r.auth_mode : 'ok'; setKeyStatus(mode,'#10b981'); } catch(e){ setKeyStatus('invalid','#ef4444'); } }
+function setBadge(id,label,isOk){ const el=document.getElementById(id); if(!el) return; el.textContent='['+label+': '+(isOk?'✓':'×')+']'; el.style.color=isOk?'#10b981':'#ef4444'; }
+async function checkAuth(){
+    try{
+        const r = await fetchJSON('/health/dev');
+        const mode = (r && r.auth_mode) ? r.auth_mode : 'ok';
+        setKeyStatus(mode,'#10b981');
+        setBadge('metaStatus','meta', !!r.meta_ok);
+        setBadge('llmStatus','llm', !!r.llm_ok);
+        setBadge('policyStatus','policy', !!r.policy_ok);
+    } catch(e){
+        setKeyStatus('invalid','#ef4444');
+        setBadge('metaStatus','meta', false);
+        setBadge('llmStatus','llm', false);
+        setBadge('policyStatus','policy', false);
+    }
+}
 function fmtResBlocks(r){const maxMap={energie:100,wissen:200,inspiration:100,ruf:100,stabilitaet:100,erfahrung:1000,level:20};return '<div class="res-list">'+Object.entries(r).map(([k,v])=>{const max=maxMap[k]||100;const pct=Math.min(100,Math.round((v/max)*100));return `<div class='res' data-k='${k}'><div><b>${k}</b> <span style='float:right'>${v}</span></div><div class='bar'><span style='width:${pct}%'></span></div></div>`}).join('')+'</div>'}
 function renderCompanions(list){const box=document.getElementById('companionsBox'); if(!list||!list.length){box.textContent='(keine)';return;} box.innerHTML=list.map(c=>`<div><b>${c.name}</b> <small>${c.archetype||''}</small> – ${c.mood||''} ${c.stats?'<code>'+Object.entries(c.stats).map(([k,v])=>k+':'+v).join(', ')+'</code>':''}</div>`).join('')}
 function renderBuffs(list){const now=Date.now()/1000;const box=document.getElementById('buffsBox'); if(!list||!list.length){box.textContent='(keine)';return;} box.innerHTML=list.map(b=>{const rem=b.expires_at?Math.max(0,Math.round(b.expires_at-now)):null; return `<div><b>${b.label}</b> <small>${b.kind||''}</small> ${b.magnitude!=null?('['+b.magnitude+']'):''} ${rem!=null?(' <span style=color:#f59e0b>'+rem+'s</span>'):''}</div>`}).join('')}
 function renderSkills(list){const box=document.getElementById('skillsBox'); if(!list||!list.length){box.textContent='(keine)';return;} box.innerHTML=list.map(s=>`<div><b>${s.name}</b> Lv ${s.level} <small>${s.category||''}</small> <span style='opacity:.6'>xp:${s.xp}</span></div>`).join('')}
 function loadState(){fetchJSON('/story/state').then(st=>{const energy=st.resources.energie||0; const energyWarn = energy<30?"<div style='color:#f59e0b;font-size:11px;margin-top:6px'>Niedrige Energie</div>":""; const arcColor = st.arc.includes('krise')?'#dc2626':(st.arc.includes('aufbau')?'#2563eb':(st.arc.includes('ruhe')?'#10b981':'#6b7280')); const arcBadge = `<span style='background:${arcColor};padding:2px 8px;border-radius:12px;font-size:11px;margin-left:8px'>${st.arc}</span>`; j('stateBox',`Arc: <b>${st.arc}</b>${arcBadge}<br>Mood: ${st.mood}<br>Epoch: ${st.epoch}<br>${fmtResBlocks(st.resources)}${energyWarn}`);renderCompanions(st.companions);renderBuffs(st.buffs);renderSkills(st.skills);renderOpts(st.options)}).catch(e=>console.error(e))}
 function renderOpts(opts){const box=document.getElementById('optsBox');box.innerHTML=''; if(!opts.length){box.textContent='(keine)';return} opts.forEach(o=>{const b=document.createElement('button'); b.textContent=`${o.label}`; if((o.tags||[]).includes('levelup')){b.classList.add('levelup')} const riskSpan=document.createElement('span'); riskSpan.className='risk r'+(o.risk||0); riskSpan.textContent='R'+(o.risk||0); b.appendChild(riskSpan); b.onclick=()=>act(o.id); box.appendChild(b)})}
-function loadLog(){fetchJSON('/story/log?limit=80').then(events=>{const box=document.getElementById('logBox'); box.innerHTML=events.map(e=>{let badges=''; if(e.deltas){ if(e.deltas.level>0){badges+=`<span class='badge level'>Level +${e.deltas.level}</span>`;} if(e.deltas.inspiration && e.deltas.inspiration>5){badges+=`<span class='badge insp'>+${e.deltas.inspiration} Insp</span>`;} } return `<div class='log-item kind-${e.kind}'>[${e.epoch}] <span>${e.kind}</span>: ${e.text} ${badges}</div>`}).join('')}).catch(e=>{})}
+function loadLog(){fetchJSON('/story/log?limit=80').then(events=>{const box=document.getElementById('logBox'); box.innerHTML=events.map(e=>{let badges=''; if(e.deltas){ if(e.deltas.level>0){badges+=`<span class='badge level'>Level +${e.deltas.level}</span>`;} if(e.deltas.inspiration && e.deltas.inspiration>5){badges+=`<span class='badge insp'>+${e.deltas.inspiration} Insp</span>`;} } return `<div class='log-item kind-${e.kind}'>[${e.epoch}] <span>${e.kind}</span>: ${e.text} ${badges}</div>`}).join(''); const d=document.getElementById('dashStory'); if(d){ d.innerHTML = (events||[]).slice(-8).reverse().map(e=>{ return `<div style='opacity:.9'>[${e.epoch}] ${e.kind}: ${e.text}</div>`; }).join(''); } }).catch(e=>{})}
 function act(id){fetchJSON('/story/action',{method:'POST',body:JSON.stringify({option_id:id})}).then(e=>{loadState();prependLog(e)})}
 function free(){const t=document.getElementById('freeText').value.trim(); if(!t) return; fetchJSON('/story/action',{method:'POST',body:JSON.stringify({free_text:t})}).then(e=>{document.getElementById('freeText').value=''; loadState(); prependLog(e)})}
 function advance(){fetchJSON('/story/advance',{method:'POST'}).then(e=>{loadState();prependLog(e)})}
 function regen(){fetchJSON('/story/options/regen',{method:'POST'}).then(_=>loadState())}
 function prependLog(ev){const box=document.getElementById('logBox'); const div=document.createElement('div');div.className='log-item kind-'+ev.kind; div.innerHTML=`[${ev.epoch}] <span>${ev.kind}</span>: ${ev.text}`; box.prepend(div)}
 document.getElementById('btnFree').onclick=free; document.getElementById('btnAdvance').onclick=advance; document.getElementById('btnRegen').onclick=regen;
-loadState(); loadLog(); checkAuth();
+// Bind style/events buttons
+document.getElementById('btnSaveStyle').onclick=saveStyle;
+document.getElementById('btnSaveEvents').onclick=saveEventsCfg;
+// Bind auth buttons
+document.getElementById('btnLogin').onclick=doLogin;
+document.getElementById('btnRegister').onclick=doRegister;
+document.getElementById('btnLogout').onclick=doLogout;
+// Bind view settings save
+document.getElementById('btnSaveView').onclick=saveView;
+document.getElementById('btnApplyPalette').onclick=savePalette;
+const navBtnDash=document.getElementById('navBtnDashboard'); if(navBtnDash){ navBtnDash.onclick=()=>setPane('dashboard'); }
+const navBtnStory=document.getElementById('navBtnStory'); if(navBtnStory){ navBtnStory.onclick=()=>setPane('story'); }
+const navBtnSug=document.getElementById('navBtnSuggestions'); if(navBtnSug){ navBtnSug.onclick=()=>{ setPane('suggestions'); loadSuggestionsList(); }}
+const navBtnPlanPR=document.getElementById('navBtnPlanPR'); if(navBtnPlanPR){ navBtnPlanPR.onclick=()=>setPane('planpr'); }
+const navBtnPolicies=document.getElementById('navBtnPolicies'); if(navBtnPolicies){ navBtnPolicies.onclick=()=>{ setPane('policies'); loadPolicyCurrent(); }}
+// Initial loads
+setPane('dashboard');
+loadState(); loadLog(); checkAuth(); checkMetrics(); loadOpenSuggestions(); loadStyle(); loadEventsCfg(); loadMe(); loadPalette();
+// Plan -> PR UI
+function setPRResult(text,color){ const el=document.getElementById('prResult'); if(el){ el.style.color=color||'#9ca3af'; el.textContent=text; } }
+// Account / Settings logic
+function applyViewSettings(s){ try{
+        const role=(s&&s.role)||'beginner';
+        const mode=(s&&s.mode)||'productive';
+        const theme=(s&&s.theme)||'dark';
+        const density=(s&&s.density)||'comfy';
+    const is_public=!!(s&&s.is_public);
+        // reflect controls
+        const r=document.getElementById('setRole'); if(r) r.value=role;
+        const m=document.getElementById('setMode'); if(m) m.value=mode;
+        const th=document.getElementById('setTheme'); if(th) th.value=theme;
+        const d=document.getElementById('setDensity'); if(d) d.value=density;
+    const pub=document.getElementById('setPublic'); if(pub) pub.checked=is_public;
+        // attributes for CSS hooks
+    document.body.dataset.mode=mode; document.body.dataset.theme=theme; document.body.dataset.density=density; document.body.dataset.public = is_public? '1':'0';
+    // header badge
+    const ps = document.getElementById('pubStatus'); if(ps){ ps.textContent = is_public? '[öffentlich]':'[privat]'; ps.style.color = is_public? '#22c55e':'#9ca3af'; }
+        // conditional UI: beginner hides Plan→PR pane
+        const pr=document.getElementById('planPRSection'); if(pr){ pr.style.display = (role==='beginner')? 'none':'block'; }
+        const navP=document.getElementById('navBtnPlanPR'); if(navP){ navP.style.display = (role==='beginner')? 'none':'inline-block'; }
+    }catch(_){} }
+async function loadMe(){
+    try{
+        const r = await fetchJSON('/me');
+        const user=r.user; const settings=r.settings||{};
+        document.getElementById('authBox').style.display='none';
+        document.getElementById('userBox').style.display='flex';
+        document.getElementById('viewSettings').style.display='block';
+        document.getElementById('userInfo').textContent = 'Angemeldet als '+(user.email||user.id);
+        applyViewSettings(settings);
+    }catch(e){
+        document.getElementById('authBox').style.display='flex';
+        document.getElementById('userBox').style.display='none';
+        document.getElementById('viewSettings').style.display='none';
+    }
+}
+async function doLogin(){
+    try{
+        const email=document.getElementById('authEmail').value.trim();
+        const password=document.getElementById('authPass').value;
+        const r = await fetchJSON('/auth/login',{method:'POST', body: JSON.stringify({email,password})});
+        await loadMe();
+    }catch(e){ alert('Login fehlgeschlagen'); }
+}
+async function doRegister(){
+    try{
+        const email=document.getElementById('authEmail').value.trim();
+        const password=document.getElementById('authPass').value;
+        const rr = await fetchJSON('/auth/register',{method:'POST', body: JSON.stringify({email,password})});
+        await doLogin();
+    }catch(e){ alert('Registrierung fehlgeschlagen'); }
+}
+async function doLogout(){ try{ await fetchJSON('/auth/logout',{method:'POST'}); }catch(_){ } finally { await loadMe(); } }
+async function saveView(){
+    try{
+        const role=document.getElementById('setRole').value;
+        const mode=document.getElementById('setMode').value;
+        const theme=document.getElementById('setTheme').value;
+        const density=document.getElementById('setDensity').value;
+        const is_public=!!document.getElementById('setPublic').checked;
+        const r = await fetchJSON('/me/settings',{method:'PATCH', body: JSON.stringify({role,mode,theme,density,is_public})});
+        applyViewSettings(r);
+        document.getElementById('viewInfo').textContent='gespeichert'; setTimeout(()=>{document.getElementById('viewInfo').textContent='';},1200);
+    }catch(e){ document.getElementById('viewInfo').textContent='Fehler'; }
+}
+// Palette steuern (lokale Präferenz)
+let hueTimer=null;
+function applyPalette(p){ try{
+    const root=document.documentElement;
+    if(p && typeof p.h1==='number') root.style.setProperty('--primary-h', String(p.h1));
+    if(p && typeof p.h2==='number') root.style.setProperty('--secondary-h', String(p.h2));
+    const hp=document.getElementById('huePrimary'); if(hp && p && typeof p.h1==='number') hp.value=String(p.h1);
+    const hs=document.getElementById('hueSecondary'); if(hs && p && typeof p.h2==='number') hs.value=String(p.h2);
+    const rot=document.getElementById('hueRotate'); if(rot) rot.checked=!!(p && p.rotate);
+    if(hueTimer){ clearInterval(hueTimer); hueTimer=null; }
+    if(p && p.rotate){ hueTimer=setInterval(()=>{
+        const cur=parseInt((getComputedStyle(root).getPropertyValue('--primary-h')||'210').trim())||210;
+        const next=(cur+2)%360; root.style.setProperty('--primary-h', String(next));
+    },180); }
+}catch(_){}}
+function loadPalette(){ try{ const raw=localStorage.getItem('palette'); const p=raw? JSON.parse(raw):{h1:210,h2:330,rotate:false}; applyPalette(p);}catch(_){ applyPalette({h1:210,h2:330,rotate:false}); }}
+async function savePalette(){ try{ const h1=parseInt(document.getElementById('huePrimary').value)||210; const h2=parseInt(document.getElementById('hueSecondary').value)||330; const rotate=!!document.getElementById('hueRotate').checked; const p={h1,h2,rotate}; localStorage.setItem('palette', JSON.stringify(p)); applyPalette(p); const vi=document.getElementById('viewInfo'); if(vi){ vi.textContent='Farben angewendet'; setTimeout(()=>vi.textContent='',1200);} }catch(_){}}
+// Style & Events controls
+async function loadStyle(){
+    try{
+        const vs = await fetchJSON('/story/voices');
+        const sel = document.getElementById('styleVoice');
+        sel.innerHTML = '<option value="">(keine)</option>' + (vs||[]).map(v=>`<option value="${v}">${v}</option>`).join('');
+    }catch(_){}
+    try{
+        const s = await fetchJSON('/story/style');
+        document.getElementById('styleTone').value = (s.tone||'');
+        document.getElementById('styleTemp').value = (s.temperature!=null?s.temperature:0.6);
+        const sel = document.getElementById('styleVoice'); if(sel){ sel.value = s.voice||''; }
+        document.getElementById('styleInfo').textContent = 'geladen';
+        setTimeout(()=>{document.getElementById('styleInfo').textContent='';}, 1200);
+    }catch(e){ document.getElementById('styleInfo').textContent='Fehler beim Laden'; }
+}
+async function saveStyle(){
+    try{
+        const tone = document.getElementById('styleTone').value;
+        const temp = parseFloat(document.getElementById('styleTemp').value);
+        const voice = document.getElementById('styleVoice').value || null;
+        const body = { tone: tone, temperature: isNaN(temp)? undefined : temp, voice: voice };
+        const r = await fetchJSON('/story/style', {method:'PATCH', body: JSON.stringify(body)});
+        document.getElementById('styleInfo').textContent = (r && r.status==='ok')? 'gespeichert' : 'Status: '+(r.status||'?');
+        setTimeout(()=>{document.getElementById('styleInfo').textContent='';}, 1400);
+    }catch(e){ document.getElementById('styleInfo').textContent = 'Fehler'; }
+}
+async function loadEventsCfg(){
+    try{
+        const c = await fetchJSON('/story/events/config');
+        document.getElementById('evtEnabled').checked = !!c.enabled;
+        document.getElementById('evtProb').value = (c.prob!=null? c.prob: 0.15);
+        document.getElementById('eventsInfo').textContent = 'geladen';
+        setTimeout(()=>{document.getElementById('eventsInfo').textContent='';}, 1200);
+    }catch(e){ document.getElementById('eventsInfo').textContent='Fehler beim Laden'; }
+}
+// Suggestions UI
+let currentSug=null;
+function getSugFilters(){ try{
+    const st=(document.getElementById('sugFilterStatus')||{}).value||'all';
+    const sort=(document.getElementById('sugSort')||{}).value||'newest';
+    const q=(document.getElementById('sugSearch')||{}).value||'';
+    return {status:st, sort, q:q.trim().toLowerCase()};
+}catch(_){ return {status:'all', sort:'newest', q:''}; }}
+function applySugFilters(items){ const f=getSugFilters();
+    let out = Array.isArray(items)? items.slice():[];
+    if(f.status && f.status!=='all'){ out = out.filter(it=> (it.status||'').toLowerCase().includes(f.status==='approved'?'approved':(f.status==='revised'?'revised':'draft')) ); }
+    if(f.q){ out = out.filter(it=> String(it.goal||'').toLowerCase().includes(f.q) || String(it.id||'').toLowerCase().includes(f.q)); }
+    out.sort((a,b)=> f.sort==='oldest' ? (a.created_at-b.created_at) : (b.created_at-a.created_at));
+    return out;
+}
+function renderSugList(items){ const pane=document.getElementById('sugListPane'); if(!pane) return; const list=applySugFilters(items);
+    if(!Array.isArray(list)||list.length===0){ pane.innerHTML='<em style="color:var(--muted)">Keine Vorschläge</em>'; return;}
+    pane.innerHTML = list.map(it=>{
+    const st = (it.status||'entwurf');
+    return `<div style="border:1px solid var(--border);border-radius:8px;padding:8px">
+        <div><strong>${escapeHtml(it.goal||('Vorschlag #'+it.id))}</strong> <span class="badge">${escapeHtml(st)}</span></div>
+        <div style="font-size:12px;color:var(--muted)">ID: ${escapeHtml(String(it.id))} • erstellt: ${new Date((it.created_at||0)*1000).toLocaleString()}</div>
+        <div style="margin-top:6px"><button data-sel="${escapeHtml(String(it.id))}">Details</button></div>
+    </div>`; }).join('');
+    // bind detail buttons
+    pane.querySelectorAll('button[data-sel]').forEach(btn=>{
+        btn.addEventListener('click',()=> loadSuggestionDetail(btn.getAttribute('data-sel')));
+    });
+}
+async function loadSuggestionsList(){ try{ const j=await fetchJSON('/suggest/list'); renderSugList(j.items||[]); const cnt=(j.open!=null?j.open:(j.total!=null?j.total:(Array.isArray(j.items)?j.items.length:0))); const nav=document.getElementById('navSug'); if(nav) nav.textContent='Vorschläge: '+cnt; }catch(_){ renderSugList([]); }}
+async function loadSuggestionImpact(id){ try{ const imp=await fetchJSON('/suggest/impact?id='+encodeURIComponent(id)); const box=document.getElementById('sugDetail'); if(box){ const impHtml = `<div style='margin-top:8px;padding:8px;border:1px dashed var(--border);border-radius:8px'><b>Impact</b><div style='font-size:12px;color:var(--muted)'>Score: ${imp.score} • ${escapeHtml(imp.rationale||'')}</div></div>`; box.insertAdjacentHTML('beforeend', impHtml); } }catch(_){ /* impact not yet available */ } }
+async function loadSuggestionDetail(id){ try{ const j=await fetchJSON('/suggest/review?id='+encodeURIComponent(id)); currentSug=j; const box=document.getElementById('sugDetail'); if(box){ box.style.color=''; box.innerHTML = `
+    <div style='border:1px solid var(--border);border-radius:8px;padding:10px'>
+        <div><strong>${escapeHtml(j.summary||j.goal||('Vorschlag #'+j.id))}</strong></div>
+        <div style='font-size:12px;color:var(--muted);margin:4px 0'>Status: ${escapeHtml(j.status||'entwurf')}</div>
+        <div style='margin-top:6px'><b>Begründung</b><br>${escapeHtml(j.rationale||'-')}</div>
+        <div style='margin-top:6px'><b>Schritte</b><ul style='margin:4px 0 0 16px'>${(j.recommended_steps||[]).map(s=>'<li>'+escapeHtml(s)+'</li>').join('')}</ul></div>
+        <div style='margin-top:6px'><b>Risiken</b><ul style='margin:4px 0 0 16px'>${(j.risk_notes||[]).map(s=>'<li>'+escapeHtml(s)+'</li>').join('')}</ul></div>
+        ${(j.metrics_impact? (`<div style='margin-top:6px'><b>Erwartete Wirkung</b> <code>${escapeHtml(JSON.stringify(j.metrics_impact))}</code></div>`):'')}
+    </div>`; }
+    const acts=document.getElementById('sugActions'); if(acts){ acts.style.display='block'; }
+    // try to load impact if available (after approval)
+    loadSuggestionImpact(j.id);
+}catch(_){ const box=document.getElementById('sugDetail'); if(box){ box.style.color='#ef4444'; box.textContent='Fehler beim Laden'; } }}
+async function reviewSuggestion(approve){ if(!currentSug){ return; } try{ const j=await fetchJSON('/suggest/review',{ method:'POST', body: JSON.stringify({ id: currentSug.id, approve: !!approve }) }); document.getElementById('sugInfo').textContent = approve? 'Übernommen' : 'Abgelehnt'; setTimeout(()=>{document.getElementById('sugInfo').textContent='';}, 1200); await loadSuggestionsList(); await loadSuggestionDetail(currentSug.id); }catch(_){ document.getElementById('sugInfo').textContent='Fehler'; }}
+async function generateSuggestion(){ try{ const goal=(document.getElementById('sugGoal').value||'').trim(); if(!goal){ document.getElementById('sugInfo').textContent='Bitte Ziel angeben'; return;} document.getElementById('sugInfo').textContent='Erzeuge…'; await fetchJSON('/suggest/generate',{ method:'POST', body: JSON.stringify({ goal }) }); document.getElementById('sugInfo').textContent='Erstellt'; setTimeout(()=>{document.getElementById('sugInfo').textContent='';},1000); await loadSuggestionsList(); }catch(_){ document.getElementById('sugInfo').textContent='Fehler'; }}
+['sugFilterStatus','sugSort','sugSearch'].forEach(id=>{ const el=document.getElementById(id); if(el){ el.addEventListener('input',()=>loadSuggestionsList()); el.addEventListener('change',()=>loadSuggestionsList()); }});
+const sugRefresh=document.getElementById('sugRefresh'); if(sugRefresh){ sugRefresh.onclick=loadSuggestionsList; }
+const sugGen=document.getElementById('sugGenerate'); if(sugGen){ sugGen.onclick=generateSuggestion; }
+const sugApprove=document.getElementById('sugApprove'); if(sugApprove){ sugApprove.onclick=()=>reviewSuggestion(true); }
+const sugReject=document.getElementById('sugReject'); if(sugReject){ sugReject.onclick=()=>reviewSuggestion(false); }
+async function saveEventsCfg(){
+    try{
+        const enabled = !!document.getElementById('evtEnabled').checked;
+        const prob = parseFloat(document.getElementById('evtProb').value);
+        const r = await fetchJSON('/story/events/config', {method:'PATCH', body: JSON.stringify({enabled, prob})});
+        document.getElementById('eventsInfo').textContent = (r && r.status==='ok')? 'gespeichert' : 'Status: '+(r.status||'?');
+        setTimeout(()=>{document.getElementById('eventsInfo').textContent='';}, 1400);
+    }catch(e){ document.getElementById('eventsInfo').textContent='Fehler'; }
+}
+async function doPlanPR(){
+    try{
+        const intentEl=document.getElementById('prIntent');
+        const riskEl=document.getElementById('prRisk');
+        const dryEl=document.getElementById('prDry');
+        const draftEl=document.getElementById('prDraft');
+        const labelsEl=document.getElementById('prLabels');
+        const intent=(intentEl && intentEl.value?intentEl.value:'').trim();
+        if(!intent){ setPRResult('Bitte Intent angeben','#f59e0b'); return; }
+        const risk = riskEl && riskEl.value ? riskEl.value : '';
+        const dry = !!(dryEl && dryEl.checked);
+        const draft = !!(draftEl && draftEl.checked);
+        const labelsTxt = (labelsEl && labelsEl.value?labelsEl.value:'');
+        const labels = labelsTxt.split(',').map(s=>s.trim()).filter(Boolean);
+        setPRResult('Erzeuge Plan/Branch...','#9ca3af');
+        const body = { intent: intent, dry_run: dry, draft: draft };
+        if(risk){ body.risk_budget = risk; }
+        if(labels && labels.length){ body.labels = labels; }
+        const r = await fetchJSON('/dev/pr-from-plan',{method:'POST', body: JSON.stringify(body)});
+        if(r.status==='created'){
+            const txt = r.pr_url ? ('PR erstellt: '+r.pr_url) : ('Branch erstellt: '+(r.branch||''));
+            setPRResult(txt,'#10b981');
+        } else if(r.status==='dry-run'){
+            const txt = 'Dry-Run: Branch wäre '+(r.branch||'(n/a)')+'.';
+            setPRResult(txt,'#60a5fa');
+        } else if(r.status==='error'){
+            setPRResult('Fehler: '+(r.message||'unbekannt'),'#ef4444');
+        } else {
+            setPRResult('Status: '+r.status,'#9ca3af');
+        }
+    } catch(e){ setPRResult('Fehler beim Anlegen des PR: '+e,'#ef4444'); }
+}
+const btnPlanPR=document.getElementById('btnPlanPR'); if(btnPlanPR){ btnPlanPR.onclick=doPlanPR; }
+// Policies UI
+async function loadPolicyCurrent(){ try{ const cur=await fetchJSON('/policy/current'); const pre=document.getElementById('policyCurrent'); if(pre){ pre.textContent = JSON.stringify(cur,null,2); } }catch(_){ const pre=document.getElementById('policyCurrent'); if(pre){ pre.textContent='Fehler beim Laden'; pre.style.color='#ef4444'; } }}
+async function doPolicyReload(){ try{ await fetchJSON('/policy/reload',{method:'POST', body: JSON.stringify({})}); document.getElementById('policyInfo').textContent='reload ok'; setTimeout(()=>document.getElementById('policyInfo').textContent='',1200); await loadPolicyCurrent(); }catch(_){ document.getElementById('policyInfo').textContent='reload fehler'; }}
+async function doPolicyDryRun(){ try{ const y=document.getElementById('policyYaml').value||''; const r=await fetchJSON('/policy/dry-run',{method:'POST', body: JSON.stringify({yaml:y})}); document.getElementById('policyInfo').textContent = (r&&r.status)||'dry-run ok'; setTimeout(()=>document.getElementById('policyInfo').textContent='',1200); }catch(_){ document.getElementById('policyInfo').textContent='dry-run fehler'; }}
+async function doPolicyApply(){ try{ const y=document.getElementById('policyYaml').value||''; const r=await fetchJSON('/policy/apply',{method:'POST', body: JSON.stringify({yaml:y})}); document.getElementById('policyInfo').textContent = (r&&r.status)||'apply ok'; setTimeout(()=>document.getElementById('policyInfo').textContent='',1200); await loadPolicyCurrent(); }catch(_){ document.getElementById('policyInfo').textContent='apply fehler'; }}
+const btnPolReload=document.getElementById('btnPolicyReload'); if(btnPolReload){ btnPolReload.onclick=doPolicyReload; }
+const btnPolDry=document.getElementById('btnPolicyDryRun'); if(btnPolDry){ btnPolDry.onclick=doPolicyDryRun; }
+const btnPolApply=document.getElementById('btnPolicyApply'); if(btnPolApply){ btnPolApply.onclick=doPolicyApply; }
 // Help Overlay Logic
 const helpToggle=document.getElementById('helpToggle');
 const helpOverlay=document.getElementById('helpOverlay');
@@ -1561,16 +2574,21 @@ fetchJSON('/glossary').then(g=>{glossary=g||[]; if(helpOverlay.style.display==='
 function trackEvent(ev){try{lastEvents.push(ev); if(lastEvents.length>50) lastEvents=lastEvents.slice(-50); if(helpOverlay.style.display==='block' && !document.querySelector('#helpTabs .htab.active[data-tab="gloss"]')){renderHelpTips();}}catch(_){}}
 // SSE
 let es; let esRetry=0; const maxRetry=10; const statusEl=document.getElementById('sseStatus');
-function sseSet(st, color){ if(statusEl){ statusEl.textContent='[SSE: '+st+']'; statusEl.style.color=color||'#888'; } }
+function sseSet(st, color){ if(statusEl){ statusEl.textContent='[SSE: '+st+']'; statusEl.style.color=color||'#888'; } const nav=document.getElementById('navSSE'); if(nav){ nav.textContent='SSE: '+st; } const ds=document.getElementById('dashSse'); if(ds){ ds.textContent = st; } }
 function startSSE(){
     try{ if(es){ es.close(); }
         es = new EventSource('/events',{withCredentials:false});
         sseSet('verbunden','#10b981'); esRetry=0;
         es.addEventListener('open',()=>sseSet('offen','#10b981'));
         es.onmessage=()=>{};
-        es.addEventListener('story.state',()=>{loadState()});
+    es.addEventListener('story.state',()=>{loadState()});
         es.addEventListener('story.event',()=>{loadLog()});
                 es.addEventListener('story.event',e=>{try{trackEvent(JSON.parse(e.data))}catch(_){}});
+    es.addEventListener('ready',()=>{ checkAuth(); });
+    es.addEventListener('suggest.generated',()=>{ loadOpenSuggestions(); if(currentPane==='suggestions'){ loadSuggestionsList(); } });
+    es.addEventListener('suggest.approved',()=>{ loadOpenSuggestions(); if(currentPane==='suggestions'){ loadSuggestionsList(); } });
+    es.addEventListener('suggest.revised',()=>{ loadOpenSuggestions(); if(currentPane==='suggestions'){ loadSuggestionsList(); } });
+    es.addEventListener('suggest.open',()=>{ loadOpenSuggestions(); });
         es.onerror=()=>{ es.close(); sseSet('getrennt','#f59e0b'); if(esRetry<maxRetry){ const t = Math.min(10000, 500 * Math.pow(1.6, esRetry)); esRetry++; setTimeout(startSSE,t);} else { sseSet('fail','#ef4444'); } };
     }catch(e){ console.warn('SSE fail',e); sseSet('fehler','#ef4444'); }
 }
@@ -1578,6 +2596,9 @@ startSSE();
 setInterval(()=>{loadState();},20000);
 // Log Filter
 document.getElementById('logFilter').addEventListener('input',()=>{ const v = document.getElementById('logFilter').value.trim(); const items=[...document.querySelectorAll('#logBox .log-item')]; let rx=null; try{ rx = v? new RegExp(v,'i'):null;}catch(_){rx=null;} items.forEach(it=>{ const txt=it.textContent||''; it.style.display = !v? '' : (rx? (rx.test(txt)?'':'none') : (txt.toLowerCase().includes(v.toLowerCase())?'':'none')); }); });
+// Metrics & Suggestions
+async function checkMetrics(){ try{ const res = await fetch('/metrics'); const ok = res && res.ok; const nav=document.getElementById('navMetrics'); if(nav){ nav.textContent='/metrics: '+(ok?'ok':'fehler'); } const dm=document.getElementById('dashMetrics'); if(dm){ dm.textContent = ok? 'ok':'fehler'; } }catch(_){ const nav=document.getElementById('navMetrics'); if(nav){ nav.textContent='/metrics: fehler'; } const dm=document.getElementById('dashMetrics'); if(dm){ dm.textContent = 'fehler'; } } }
+async function loadOpenSuggestions(){ try{ const j=await fetchJSON('/suggest/list'); const cnt = (j && typeof j.total==='number')? j.total : (Array.isArray(j.items)? j.items.length: 0); const nav=document.getElementById('navSug'); if(nav){ nav.textContent = 'Vorschläge: '+cnt; } const dash=document.getElementById('dashSug'); if(dash){ dash.textContent = cnt>0? (cnt+' offen') : 'keine offen'; } }catch(_){ const nav=document.getElementById('navSug'); if(nav){ nav.textContent='Vorschläge: ?'; } }}
 </script>
 </body></html>"""
         return HTMLResponse(content=html)
@@ -1624,11 +2645,13 @@ async def policy_dry_run(req: PolicyDryRunRequest, agent: str = Depends(require_
     rate_limit(agent)
     import yaml as _yaml
     try:
-        data = _yaml.safe_load(req.content) or {}
+        data_raw = _yaml.safe_load(req.content) or {}
     except Exception as e:  # noqa: BLE001
         return {"status": "error", "error": "yaml_parse", "message": str(e)}
     from policy.model import Policy as _Pol
     try:
+        from typing import cast as _cast
+        data: dict[str, Any] = _cast(dict[str, Any], data_raw if isinstance(data_raw, dict) else {})
         new_pol = _Pol.model_validate(data)
     except Exception as e:  # noqa: BLE001
         return {"status": "invalid", "error": "validation", "message": str(e)}
@@ -1639,11 +2662,13 @@ async def policy_apply(req: PolicyApplyRequest, agent: str = Depends(require_aut
     rate_limit(agent)
     import yaml as _yaml
     try:
-        data = _yaml.safe_load(req.content) or {}
+        data_raw = _yaml.safe_load(req.content) or {}
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=400, detail={"code": "yaml_parse_error", "message": str(e)})
     from policy.model import Policy as _Pol
     try:
+        from typing import cast as _cast
+        data: dict[str, Any] = _cast(dict[str, Any], data_raw if isinstance(data_raw, dict) else {})
         new_pol = _Pol.model_validate(data)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=422, detail={"code": "policy_invalid", "message": str(e)})
@@ -1674,7 +2699,7 @@ class MultiIORequest(BaseModel):
     mode: str | None = "default"
 
     def combined(self) -> str:
-        parts = []
+        parts: list[str] = []
         if self.system_guidance:
             parts.append(f"[system]\n{self.system_guidance.strip()}")
         if self.shared_context:
@@ -1687,7 +2712,7 @@ class MultiIORequest(BaseModel):
 def build_variants(kind: str, base: dict[str, Any], profiles: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for p in profiles:
-        d = {"kind": kind, **p}
+        d: dict[str, Any] = {"kind": kind, **p}
         # simple summary heuristics
         depth = p.get("depth_limit")
         explore = p.get("explore")
@@ -1705,11 +2730,13 @@ def _load_template(name: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail={"code": "template_not_found", "template": name})
     with open(path, "r", encoding="utf-8") as f:
         try:
-            data = _yaml.safe_load(f) or {}
+            data_raw = _yaml.safe_load(f) or {}
         except Exception as e:  # noqa: BLE001
             raise HTTPException(status_code=400, detail={"code": "template_yaml_error", "message": str(e)})
-    if not isinstance(data, dict):
+    if not isinstance(data_raw, dict):
         raise HTTPException(status_code=422, detail={"code": "template_invalid", "message": "root not mapping"})
+    from typing import cast as _cast
+    data: dict[str, Any] = _cast(dict[str, Any], data_raw)
     return data
 
 def _apply_risk_profile(doc: dict[str, Any], risk: str | None, notes: list[str]):
@@ -1722,9 +2749,10 @@ def _apply_risk_profile(doc: dict[str, Any], risk: str | None, notes: list[str])
     # heuristic tweaks: add synthetic rule or adjust llm temperature if present
     if risk == "low":
         # enforce deterministic llm
-        llm = doc.setdefault("llm", {})
+        llm: dict[str, Any] = doc.setdefault("llm", {})  # type: ignore[assignment]
         if isinstance(llm, dict):
-            prev = llm.get("temperature")
+            from typing import Optional, cast as _cast
+            prev = _cast(Optional[float], llm.get("temperature"))
             llm["temperature"] = 0.0
             # Immer vermerken (auch wenn bereits 0.0), damit Tests & Nutzer Feedback erhalten
             if prev != 0.0:
@@ -1732,10 +2760,11 @@ def _apply_risk_profile(doc: dict[str, Any], risk: str | None, notes: list[str])
             else:
                 notes.append("Risk Profile low bestätigt (temperature bereits 0.0)")
     elif risk == "high":
-        llm = doc.setdefault("llm", {})
+        llm: dict[str, Any] = doc.setdefault("llm", {})  # type: ignore[assignment]
         if isinstance(llm, dict):
-            prev = llm.get("temperature")
-            llm.setdefault("temperature", 0.2)
+            from typing import Optional, cast as _cast
+            prev = _cast(Optional[float], llm.get("temperature"))
+            _ = llm.setdefault("temperature", 0.2)
             if prev is None:
                 notes.append("Risk Profile high → default temperature=0.2 gesetzt")
 
@@ -1816,7 +2845,7 @@ async def plan(req: PlanRequest, agent: str = Depends(require_auth), risk_budget
     ts = int(time.time())
     os.makedirs("plans", exist_ok=True)
     plan_filename = f"plans/plan_{ts}.json"
-    artifact = {"intent": norm['intent'], "context": norm['context'], "target_files": targets, "created_at": ts, "policies": [r.get('id') for r in policies.get('rules', [])]}
+    artifact: dict[str, Any] = {"intent": norm['intent'], "context": norm['context'], "target_files": targets, "created_at": ts, "policies": [r.get('id') for r in policies.get('rules', [])]}
     with open(plan_filename, "w", encoding="utf-8") as f:
         json.dump(artifact, f, indent=2)
     if db_conn:
@@ -1833,7 +2862,7 @@ async def plan(req: PlanRequest, agent: str = Depends(require_auth), risk_budget
     # Heuristic variant generation (placeholder until Groq integration for variants)
     base_intent = norm['intent'] or 'plan'
     rb = (risk_budget or 'balanced').lower()
-    variant_specs = [
+    variant_specs: list[dict[str, Any]] = [
         {"id": "v_safe", "label": "Vorsichtig", "risk_level": "vorsichtig", "temperature": 0.0, "depth_limit": 3, "risk_budget": "low", "explore": 0.1, "review_enforcement": True},
         {"id": "v_bal", "label": "Balanciert", "risk_level": "balanciert", "temperature": 0.0, "depth_limit": 5, "risk_budget": "medium", "explore": 0.25, "review_enforcement": True},
         {"id": "v_focus", "label": "Fokussiert", "risk_level": "fokussiert", "temperature": 0.1, "depth_limit": 6, "risk_budget": "medium", "explore": 0.15, "review_enforcement": True},
@@ -1842,7 +2871,7 @@ async def plan(req: PlanRequest, agent: str = Depends(require_auth), risk_budget
     ]
     # Reorder to emphasize requested risk_budget first if provided
     if rb in ("low","medium","high"):
-        priority = {"low":0, "medium":1, "high":2}
+        priority: dict[str, int] = {"low":0, "medium":1, "high":2}
         variant_specs.sort(key=lambda v: priority.get(v['risk_budget'], 99) + (0 if v['risk_budget']==rb else 10))
 
     variants: list[PlanVariant] = []
@@ -1929,7 +2958,7 @@ async def health_dev(agent: str = Depends(require_auth)) -> HealthDevResponse:  
     return HealthDevResponse(status="ok", meta_ok=meta_ok, policy_ok=policy_ok, llm_ok=llm_ok, auth_mode=auth_mode, version=state.get('meta',{}).get('version'))
 
 @app.post("/dev/pr-from-plan", response_model=PRFromPlanResponse)
-async def pr_from_plan(req: PRFromPlanRequest, agent: str = Depends(require_auth)) -> PRFromPlanResponse:  # type: ignore[override]
+async def pr_from_plan(req: PRFromPlanRequest, agent: str = Depends(require_auth_or_role('advanced'))) -> PRFromPlanResponse:  # type: ignore[override]
     """Create a git branch, generate a plan, persist selected variant artifact and (optionally) push.
     Requires local git repo and optionally gh CLI for PR creation (if available).
     """
@@ -1971,14 +3000,33 @@ async def pr_from_plan(req: PRFromPlanRequest, agent: str = Depends(require_auth
         subprocess.run(["git","push","--set-upstream","origin",branch], check=True, capture_output=True)
         # optional PR via gh (draft + labels)
         try:
-            cp = subprocess.run([
+            # assemble gh pr create args
+            gh_args = [
                 "gh","pr","create",
                 "--title", f"Plan: {req.intent}",
                 "--body", f"Automatisch erzeugter Plan PR für {req.intent}",
-                "--label","plan",
-                "--label","ready-for-copilot",
-                "--draft"
-            ], check=True, capture_output=True)
+            ]
+            # labels: defaults + optional risk + user labels
+            _labels = ["plan", "ready-for-copilot"]
+            if req.risk_budget:
+                _labels.append(f"risk:{req.risk_budget}")
+            if req.labels:
+                for lb in req.labels:
+                    if isinstance(lb, str) and lb.strip():
+                        _labels.append(lb.strip())
+            # de-duplicate preserving order
+            seen: set[str] = set()
+            uniq_labels: list[str] = []
+            for lb in _labels:
+                if lb not in seen:
+                    uniq_labels.append(lb)
+                    seen.add(lb)
+            for lb in uniq_labels:
+                gh_args.extend(["--label", lb])
+            # draft flag
+            if req.draft is None or req.draft is True:
+                gh_args.append("--draft")
+            cp = subprocess.run(gh_args, check=True, capture_output=True)
             try:
                 out_txt = cp.stdout.decode(errors='ignore').strip()
                 import re as _re
@@ -1995,7 +3043,7 @@ async def pr_from_plan(req: PRFromPlanRequest, agent: str = Depends(require_auth
     return PRFromPlanResponse(status="created", branch=branch, artifact=plan_resp.artifact, variant=(variant.id if variant else None), pr_url=pr_url)
 
 @app.post("/plan/pr", response_model=PRFromPlanResponse)
-async def plan_pr(req: PRFromPlanRequest, agent: str = Depends(require_auth)) -> PRFromPlanResponse:  # type: ignore[override]
+async def plan_pr(req: PRFromPlanRequest, agent: str = Depends(require_auth_or_role('advanced'))) -> PRFromPlanResponse:  # type: ignore[override]
     """Alias für /dev/pr-from-plan (zukünftige Stable Route).
 
     Nutzt identische Logik (Branch-Erstellung, Commit, optionaler PR Draft) und ermöglicht clients das stabilere

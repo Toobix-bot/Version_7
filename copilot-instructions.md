@@ -1,3 +1,218 @@
+# Copilot System Instructions — Life-Agent v7
+
+## Mission
+Baue ein **selbst-erweiterndes System**, das sich über **geplante Vorschläge → Patches → Pull Requests → Reviews → Deploy** iterativ verbessert.
+- **Keine** direkten Commits auf `main` durch Automationen. Immer Branch + PR.
+- Fokus: klare Architektur, Tests, Telemetrie, UI-Signale (Plan, Suggestions, Policies, Events, Memory, Quests).
+
+## Leitplanken (unverhandelbar)
+- **Sicherheit:** Nur schreibende Aktionen via PR. Gatekeeping durch Policies/Checks.
+- **Nachvollziehbarkeit:** Jede Änderung enthält: Problem, Hypothese, Risiko, Metrik, Rollback-Plan.
+- **Idempotenz & Dry-Run:** Tools müssen Vorschau (Diff/Plan) liefern, bevor sie echte Wirkung haben.
+- **Konfiguration per Code:** `./config/*.yaml` steuert Modelle, Limits, Policies, Feature-Flags.
+
+## Architektur-Ziele
+1. **Core Service (Node/TS)**  
+  - Endpunkte: `/plan`, `/suggest`, `/patch/preview`, `/patch/apply (PR)`, `/events`, `/metrics`, `/memory`, `/quests`.  
+  - Adapter: `ai/groqAdapter.ts` (OpenAI-kompatibel), `git/githubAdapter.ts`, `deploy/renderAdapter.ts`.
+  - Job-Queue (z. B. BullMQ) für langlaufende Tasks.
+  - Testbar, mit `vitest` + `supertest`.
+
+2. **VS Code Extension (optional, aber erwünscht)**
+  - Feature: Commands „Life-Agent: Plan“, „Preview Patch“, „Create PR“, Panel mit Events/Metriken.
+  - Webview für Dashboards; Kommunikation per `vscode.postMessage`.
+  - Extension redet **nur** mit dem Core-Service (lokal/remote), keine Secrets im Client.
+
+3. **GitHub Integration**
+  - PR-Erstellung über REST API.
+  - Labels: `agent:proposal`, `risk:low|med|high`, `type:refactor|feature|fix`.
+  - Review-Kommentare generieren (strukturierte Checkliste).
+
+4. **Deploy**
+  - Render Web Service (Node). Autodeploy auf `main` oder `release/*`. Healthcheck.
+  - Env: `GROQ_API_KEY`, `GITHUB_TOKEN`, `RENDER_SERVICE_ID` etc. via `.env` (nie commiten).
+
+5. **Observability**
+  - Events/Metrics: Request-Latenzen, PR-Zykluszeiten, Akzeptanzrate, Revert-Rate, Modellkosten, Token.
+
+## Definition of Done (PR)
+- CI: Lint, Typecheck, Tests grün.
+- Änderungs-Spec im PR-Body (Template): Problem → Ansatz → Risiko → Messung → Rollback.
+- Changelog-Eintrag + Docs aktualisiert.
+- Manual QA Schritte dokumentiert.
+
+---
+
+## Tasks — bitte in dieser Reihenfolge vorschlagen & umsetzen
+
+### 0) Repo-Härtung
+- `/.github/PULL_REQUEST_TEMPLATE.md` mit obiger Checkliste.
+- CI (GitHub Actions): `lint.yml`, `test.yml`, `typecheck.yml`.
+- `commitlint` + Conventional Commits.
+
+### 1) Core-Scaffold
+- Packages: `typescript`, `tsx`, `express`, `zod`, `vitest`, `supertest`, `dotenv`, `pino`, `bullmq`, `ioredis`.
+- Ordnerstruktur:
+
+
+/src
+/adapters/ai/groqAdapter.ts
+/adapters/git/githubAdapter.ts
+/adapters/deploy/renderAdapter.ts
+/domains/{plan,suggest,patch,policy,memory,quests}/...
+/infra/{http,queue,logger,config}.ts
+/telemetry/{events,metrics}.ts
+/config/{app.yaml,policies.yaml,models.yaml}
+
+- Express-Server + `/healthz`.
+
+### 2) Groq-Adapter
+- OpenAI-kompatible Chat-Completions; `GROQ_API_KEY` aus Env; Timeout/Retry/Rate-Limit.
+- Utility: `structuredLlmCall<T>(schema: zod.Schema<T>)` für **JSON-sichere** Antworten.
+
+### 3) GitHub-Adapter (PR-only)
+- Funktionen:
+- `createBranchFromDefault()`
+- `openPullRequest({title, body, head, base})`
+- `commentOnPR(pr, markdown)`
+- `getRepoTree() / applyPatchAsBranch(diff)`
+- Dry-Run: Patch nur als Diff zurückgeben.
+
+### 4) Render-Adapter
+- `triggerDeployIfMerged()` (Webhook-kompatibel) + Status-Polling.
+- Healthcheck-Verifier.
+
+### 5) Policy Engine
+- Lese `config/policies.yaml`:  
+- Risk-Gate: max Lines Changed, verbotene Pfade (z. B. Secrets), erlaubte Domains.
+- Review-Escalation: `risk:high` → Draft-PR + Pflichtreview.
+- `evaluatePatch(diff): {risk, violations[], recommendation}`.
+
+### 6) Plan → Suggest → Patch → PR Flow
+- `/plan`: nimmt Ziel + Kontext; liefert Meilensteine, Tasks, Risiken, Metriken.
+- `/suggest`: kleinteilige Vorschläge mit Files/Reasoning.
+- `/patch/preview`: generiert unified diff.
+- `/patch/apply`: legt Branch an, commit diff, erstellt PR, kommentiert Spec.
+
+### 7) VS Code Extension
+- Kommandos:  
+- `lifeAgent.plan` → öffnet Panel mit Plan.  
+- `lifeAgent.previewPatch` → zeigt Diff, Buttons: „PR erstellen“, „Verwerfen“.  
+- `lifeAgent.openDashboard` → Webview mit Events/Metrics.
+- Settings: Service-URL, Token.
+
+### 8) UI-Dashboard (bestehend erweitern)
+- Tabs: Plan, Suggestions, Policies, Events, Metrics, Memory, Quests.
+- SSE/WebSocket für Live-Events.
+- „Risk Heatmap“ + „PR Funnel“ Charts.
+
+### 9) Telemetrie & QA
+- Metriken definieren:  
+- `pr_time_to_merge`, `pr_rejection_rate`, `revert_rate`, `avg_patch_size`, `policy_violation_rate`.
+- E2E-Happy Path Test (lokal): Plan→Suggest→Preview→PR (Draft)→Close.
+
+---
+
+## Prompt-Formate (für LLM-Aufrufe)
+
+### System Prompt (Planung)
+
+
+Du bist ein Software-Planner. Ziel: minimal-risk, testbare Schritte.
+Gib strukturierte JSON-Antwort:
+{
+"milestones": [{ "name": "", "why": "", "acceptance": [] }],
+"tasks": [{ "id": "", "title": "", "steps": [], "risk": "low|med|high", "metrics": [] }],
+"constraints": ["PR-only", "policy:<...>"]
+}
+Halte dich strikt an JSON; keine freien Texte außerhalb der Felder.
+
+
+### System Prompt (Patch-Vorschlag)
+
+
+Du bist ein Refactor-/Feature-Generator. Liefere NUR:
+{
+"changes": [
+{"file": "path", "operation": "replace|insert|delete", "at": "marker|range", "content": "..." }
+],
+"rationale": "...",
+"risk": "low|med|high"
+}
+
+
+---
+
+## Konfiguration (Beispiel)
+```yaml
+# config/models.yaml
+llm:
+  provider: groq
+  model: llama-3.1-70b-instruct
+  max_tokens: 2000
+  temperature: 0.3
+
+# config/policies.yaml
+risk:
+  maxChangedLines: 400
+  forbiddenPaths: ["**/*.env", "secrets/**"]
+  requireDraftForHighRisk: true
+  reviewers:
+   high: ["owner1","owner2"]
+   default: ["owner1"]
+
+CI/CD
+
+Actions:
+
+ci/lint.yml: pnpm eslint .
+
+ci/test.yml: pnpm vitest run
+
+ci/typecheck.yml: tsc -p tsconfig.json
+
+Deploy: Autodeploy in Render nach Merge auf main oder Release-Branch.
+```
+
+Nächste sinnvolle PRs (bitte erzeugen)
+
+feat(core): scaffold express + config + logger + healthz
+
+feat(ai): groqAdapter with structured JSON helper
+
+feat(git): PR-only adapter + dry-run
+
+feat(policy): YAML policies + evaluator
+
+feat(flow): /plan /suggest /patch/preview /patch/apply
+
+feat(vscode): minimal extension commands + webview shell
+
+feat(ui): events + metrics panels
+
+chore(ci): actions + commitlint + templates
+
+---
+
+## Tests (Erwartungen)
+- Auth-Pflicht: `/plan` ohne Key → 401/403; mit Key → OK.  
+- OpenAPI: `components.securitySchemes` enthält API-Key/Bearer; `paths./plan.post.security` gesetzt.  
+- Risk-Gate: verbotene Muster (z. B. `subprocess`, `../`) → 422/403.  
+- Whitelist: Pfade außerhalb `allowed_dirs` → 403.  
+- Policy-Reload: `invalid.yaml` → 422 mit Fehlerliste.  
+- OPA-Flag: `OPA_ENABLE=true` + `opa_allow=False` → 403/422.  
+- SSE: mindestens `ready` + 2 Heartbeats in kurzer Zeit.  
+- Metrics: `/metrics` liefert Prometheus-Textformat (inkl. neue Zähler/Histogramme).  
+Quellen: httpx **ASGITransport** für FastAPI-Tests; Prometheus-Exposition.
+
+---
+
+## Hinweise & Constraints
+- **PR-only** bleibt in allen Pfaden bestehen (keine Direkt-Writes).  
+- **Security**: Schreibende Endpunkte mit `Security(...)` absichern; FastAPI integriert Security-Schemes automatisch in OpenAPI.  
+- **SSE**: `StreamingResponse(..., media_type="text/event-stream")`, Heartbeats halten Verbindungen stabil.  
+- **Groq**: Nur Groq-SDK verwenden (`pip install groq`), `GROQ_API_KEY` aus ENV; Modell z. B. `llama-3.3-70b-versatile`.
+
 # copilot-instructions.md
 
 ## Kontext

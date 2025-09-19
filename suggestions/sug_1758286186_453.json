@@ -1,0 +1,43 @@
+{
+  "id": "sug_1758286186_453",
+  "created_at": 1758286186.6685374,
+  "status": "draft",
+  "goal": "Typisierung und Linting verbessern (Pylance-Warnungen reduzieren)",
+  "focus_paths": [
+    "api/app.py",
+    "tests/"
+  ],
+  "summary": "Vorschlag für Ziel: Typisierung und Linting verbessern (Pylance-Warnungen reduzieren)",
+  "rationale": "Keine tests/ Ordner gefunden → Grundabdeckung fehlt.",
+  "recommended_steps": [
+    "Add initial pytest suite (smoke tests for /plan and /env/info)",
+    "UI Panel 'Suggestions' hinzufügen (Liste + Detail + Approve/Revise)",
+    "Prometheus Gauge für offene Vorschläge anlegen"
+  ],
+  "potential_patches": [
+    {
+      "target": "api/app.py",
+      "diff": "--- a/api/app.py\n+++ b/api/app.py\n@@\n// Vorschlag Placeholder für Typisierung und Linting verbessern (Pylance-Warnungen reduzieren)\n"
+    },
+    {
+      "target": "tests/",
+      "diff": "--- a/tests/\n+++ b/tests/\n@@\n// Vorschlag Placeholder für Typisierung und Linting verbessern (Pylance-Warnungen reduzieren)\n"
+    }
+  ],
+  "risk_notes": [
+    "Nur Metadaten verwendet, keine geheimen ENV keys."
+  ],
+  "weaknesses": [
+    "Fehlende Testabdeckung kann Regressionen unbemerkt lassen.",
+    "README.md fehlt – Einstieg für neue Nutzer erschwert.",
+    "Keine Kennzahl für offene Vorschläge → Fortschritt schwer messbar."
+  ],
+  "metrics_impact": {
+    "tests": "+",
+    "docs": "+",
+    "observability": "+"
+  },
+  "version": "1",
+  "tags": [],
+  "impact": null
+}
