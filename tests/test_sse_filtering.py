@@ -1,4 +1,5 @@
 import pytest, asyncio
+from typing import Any
 
 @pytest.mark.asyncio
 async def test_sse_filtering(client):
@@ -23,3 +24,28 @@ async def test_sse_filtering(client):
         body2 = (await resp3.aread()).decode()
         # We may get zero or one env.info depending on queue timing; assert no foreign events leaked
         assert 'plan.created' not in body2
+
+
+@pytest.mark.asyncio
+async def test_policy_wizard_events_visible(client, monkeypatch):
+    shared_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+    def _queue_provider() -> asyncio.Queue[dict[str, Any]]:
+        return shared_queue
+
+    monkeypatch.setattr('api.core.infra._event_queues', {0: shared_queue})
+    monkeypatch.setattr('api.core.infra._get_event_queue', _queue_provider)
+    monkeypatch.setattr('api.core.infra.get_event_queue', _queue_provider)
+    monkeypatch.setattr('api.app.get_event_queue', _queue_provider)
+
+    payload = {"template": "sandbox", "goals": ["docs"], "annotate": False}
+    resp = await client.post('/policy/wizard', json=payload, headers={'X-API-Key': 'test'})
+    assert resp.status_code == 200
+
+    async with client.stream('GET', '/events?kinds=wizard.generated&test=1', headers={'X-API-Key': 'test'}) as resp_stream:
+        assert resp_stream.status_code == 200
+        body = (await resp_stream.aread()).decode()
+        assert 'event: ready' in body
+
+    event = shared_queue.get_nowait()
+    assert event['kind'] == 'wizard.generated'

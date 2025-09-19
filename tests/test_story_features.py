@@ -2,14 +2,15 @@ import os, json
 import pytest
 from httpx import AsyncClient, ASGITransport
 
-import api.app as appmod  # type: ignore
 from api.app import app, _ensure_db  # type: ignore
+from api.core.infra import get_db
 
 API_KEY = os.getenv("TEST_API_KEY", "test")
 
 def _db():  # helper to guarantee db init and return connection
-    _ensure_db()
-    return appmod.db_conn  # type: ignore
+    conn = _ensure_db()
+    assert conn is get_db()
+    return conn
 
 @pytest.mark.asyncio
 async def test_mentor_risk_and_tag():

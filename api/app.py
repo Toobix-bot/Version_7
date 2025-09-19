@@ -16,6 +16,14 @@ from .routes import wizard as wizard_routes  # Phase1: extracted wizard route
 from .routes import help as help_routes
 from .routes import advisor as advisor_routes
 from .routes import templates as templates_routes
+from api.core.infra import (
+    emit_event,
+    get_db,
+    get_event_queue,
+    get_last_activity,
+    init_db,
+    RISK_PATTERNS,
+)
 
 from fastapi import FastAPI, Depends, HTTPException, status, Request, Header, Body, Query
 from fastapi.openapi.utils import get_openapi
@@ -96,6 +104,8 @@ async def _lifespan(app_: FastAPI):  # pragma: no cover - setup wiring
         init_db()
     except Exception:
         pass
+    if get_db() is None:
+        logger.warning("database connection unavailable after init")
     try:
         load_policies()
     except Exception:
@@ -267,34 +277,21 @@ except Exception:
     pass
 
 state: Dict[str, Any] = {"agents": {}, "meta": {"version": app.version, "start": APP_START}}
-# Event queue must be bound to the active loop; tests may recreate loops. Use a mapping per loop id.
-_event_queues: dict[int, asyncio.Queue[dict[str, Any]]] = {}
-
-def _get_event_queue() -> asyncio.Queue[dict[str, Any]]:
-    loop = asyncio.get_running_loop()
-    q = _event_queues.get(id(loop))
-    if q is None:
-        q = asyncio.Queue()
-        _event_queues[id(loop)] = q
-    return q
 policies: dict[str, Any] = {"loaded_at": time.time(), "rules": []}
-# ensure db_conn has an explicit typed declaration near top (if not already)
-try:
-    db_conn  # type: ignore  # noqa: F821
-except NameError:
-    from typing import Optional as _Opt
-    db_conn: 'sqlite3.Connection | None' = None  # runtime assigned in init_db
-
 # Some test harnesses (httpx ASGITransport without lifespan) skip lifespan startup.
 # Provide a lightweight lazy initializer so endpoints can still function when
 # lifespan events did not run (e.g., direct import in tests).
-def _ensure_db() -> None:
-    global db_conn
-    if db_conn is None:
+def _ensure_db() -> sqlite3.Connection:
+    conn = get_db()
+    if conn is None:
         try:
             init_db()
         except Exception as e:  # pragma: no cover - defensive
             raise RuntimeError(f"database_init_failed: {e}")
+        conn = get_db()
+        if conn is None:  # pragma: no cover - defensive guard
+            raise RuntimeError("database_unavailable")
+    return conn
 
 REGISTRY = CollectorRegistry()
 ACTIONS_TOTAL = Counter("actions_total", "Count of observed actions", ["kind"], registry=REGISTRY)
@@ -326,8 +323,6 @@ XP_EXP = float(os.getenv("STORY_XP_EXP", "1.4"))
 INSP_TICK_THRESHOLD = int(os.getenv("STORY_INSP_TICK_THRESHOLD", "120"))
 INSP_SOFT_CAP = int(os.getenv("STORY_INSP_SOFT_CAP", "150"))
 INSP_MIN_ENERGY = int(os.getenv("STORY_INSP_MIN_ENERGY", "10"))
-
-RISK_PATTERNS = [r"\b(os\.system|subprocess\.)", r"\.\./", r"/etc/passwd", r"\b(?:ssh|https?|ftp)://", r"(?i)api[_-]?key", r"(?i)\b(token|secret)\b"]
 
 # ---------------- Models ------------------
 class ActRequest(BaseModel):
@@ -830,9 +825,10 @@ async def _story_llm_generate(prompt: str, max_tokens: int = 120) -> str:
 def _record_story_event(ev: StoryEvent) -> None:  # type: ignore[override]
     try:
         STORY_EVENTS_TOTAL.labels(ev.kind).inc()
-        if db_conn:
+        conn = get_db()
+        if conn:
             try:
-                cur = db_conn.execute("SELECT COUNT(*) FROM story_options")
+                cur = conn.execute("SELECT COUNT(*) FROM story_options")
                 cnt = cur.fetchone()[0]
                 STORY_OPTIONS_OPEN.set(int(cnt))
             except Exception:
@@ -845,23 +841,23 @@ def _record_story_event(ev: StoryEvent) -> None:  # type: ignore[override]
 @app.get("/story/state", response_model=StoryState)
 async def story_get_state(agent: str = Depends(require_auth)) -> StoryState:  # type: ignore[override]
     rate_limit(agent)
-    _ensure_db()
+    conn = _ensure_db()
     # Aufräumen abgelaufener Buffs vor Zustandsabruf
     try:
         now = _story_now()
-        db_conn.execute("DELETE FROM story_buffs WHERE expires_at IS NOT NULL AND expires_at < ?", (now,))  # type: ignore[arg-type]
-        db_conn.commit()
+        conn.execute("DELETE FROM story_buffs WHERE expires_at IS NOT NULL AND expires_at < ?", (now,))
+        conn.commit()
     except Exception:
         pass
-    st = _get_story_state(db_conn)  # type: ignore[arg-type]
+    st = _get_story_state(conn)
     return st
 
 @app.get("/story/export")
 async def story_export(limit: int = 100, agent: str = Depends(require_auth)) -> dict[str, Any]:  # type: ignore[override]
     rate_limit(agent)
-    _ensure_db()
-    st = _get_story_state(db_conn)  # type: ignore[arg-type]
-    cur = db_conn.execute("SELECT id, ts, epoch, kind, text, mood, deltas, tags, option_ref FROM story_events ORDER BY id DESC LIMIT ?", (limit,))  # type: ignore[arg-type]
+    conn = _ensure_db()
+    st = _get_story_state(conn)
+    cur = conn.execute("SELECT id, ts, epoch, kind, text, mood, deltas, tags, option_ref FROM story_events ORDER BY id DESC LIMIT ?", (limit,))
     evs: list[dict[str, Any]] = []
     for row in cur.fetchall():
         rid, ts, epoch, kind, text, mood, deltas_json, tags_json, option_ref = row
@@ -875,24 +871,25 @@ async def story_export(limit: int = 100, agent: str = Depends(require_auth)) -> 
 @app.post("/story/reset")
 async def story_reset(agent: str = Depends(require_auth)) -> dict[str, Any]:  # type: ignore[override]
     rate_limit(agent)
-    _ensure_db()
+    conn = _ensure_db()
     base_resources = {"energie": 80, "inspiration": 20, "wissen": 0, "erfahrung": 0, "stabilitaet": 50, "level": 1}
-    db_conn.execute("UPDATE story_state SET ts=?, epoch=?, mood=?, arc=?, resources=? WHERE id=1", (_story_now(), 0, "neutral", "beginn", json.dumps(base_resources)))  # type: ignore[arg-type]
+    conn.execute("UPDATE story_state SET ts=?, epoch=?, mood=?, arc=?, resources=? WHERE id=1", (_story_now(), 0, "neutral", "beginn", json.dumps(base_resources)))
     try:
-        db_conn.execute("DELETE FROM story_events")
-        db_conn.execute("DELETE FROM story_options")
+        conn.execute("DELETE FROM story_events")
+        conn.execute("DELETE FROM story_options")
     except Exception:
         pass
-    st = _get_story_state(db_conn)  # type: ignore[arg-type]
-    _refresh_story_options(db_conn, st)
-    db_conn.commit()
+    st = _get_story_state(conn)
+    _refresh_story_options(conn, st)
+    conn.commit()
     await emit_event("story.reset", {})
     return {"status": "reset", "state": st.model_dump()}
 
 @app.get("/story/log", response_model=list[StoryEvent])
 async def story_log(limit: int = 50, agent: str = Depends(require_auth)) -> list[StoryEvent]:  # type: ignore[override]
     rate_limit(agent)
-    cur = db_conn.execute("SELECT id, ts, epoch, kind, text, mood, deltas, tags, option_ref FROM story_events ORDER BY id DESC LIMIT ?", (limit,))  # type: ignore[arg-type]
+    conn = _ensure_db()
+    cur = conn.execute("SELECT id, ts, epoch, kind, text, mood, deltas, tags, option_ref FROM story_events ORDER BY id DESC LIMIT ?", (limit,))
     out: list[StoryEvent] = []
     for row in cur.fetchall():
         rid, ts, epoch, kind, text, mood, deltas_json, tags_json, option_ref = row
@@ -926,7 +923,8 @@ async def story_log(limit: int = 50, agent: str = Depends(require_auth)) -> list
 @app.get("/story/options", response_model=list[StoryOption])
 async def story_options(agent: str = Depends(require_auth)) -> list[StoryOption]:  # type: ignore[override]
     rate_limit(agent)
-    st = _get_story_state(db_conn)  # type: ignore[arg-type]
+    conn = _ensure_db()
+    st = _get_story_state(conn)
     return st.options
 
 class StoryActionRequest(BaseModel):
@@ -936,13 +934,14 @@ class StoryActionRequest(BaseModel):
 @app.post("/story/action", response_model=StoryEvent)
 async def story_action(req: StoryActionRequest, agent: str = Depends(require_auth)) -> StoryEvent:  # type: ignore[override]
     rate_limit(agent)
-    st = _get_story_state(db_conn)  # type: ignore[arg-type]
+    conn = _ensure_db()
+    st = _get_story_state(conn)
     if req.option_id:
-        ev = _apply_story_option(db_conn, st, req.option_id)  # type: ignore[arg-type]
+        ev = _apply_story_option(conn, st, req.option_id)
     else:
         # free text becomes a minor inspiration action
         label = req.free_text.strip() if req.free_text else "Freies Nachdenken"
-        ev = _apply_story_option(db_conn, st, _persist_free_action(label))  # pseudo id from helper will raise for now
+        ev = _apply_story_option(conn, st, _persist_free_action(label))
         # Above placeholder; for MVP we simply create a synthetic event
     # enrich text with LLM
     prompt = f"Aktueller Zustand: Ressourcen={st.resources}\nAktion: {ev.text}\nFormuliere einen kurzen erzählerischen Satz im Präteritum (<=25 Wörter)."
@@ -956,15 +955,17 @@ def _persist_free_action(label: str) -> str:
     # create transient option to reuse apply logic with neutral deltas
     oid = f"opt_free_{int(_story_now())}"
     opt = StoryOption(id=oid, label=label, rationale="Freitext Aktion", risk=1, expected={"inspiration": +1, "energie": -1})
-    _persist_options(db_conn, [opt])  # type: ignore[arg-type]
+    conn = _ensure_db()
+    _persist_options(conn, [opt])
     return oid
 
 @app.post("/story/advance", response_model=StoryEvent)
 async def story_advance(agent: str = Depends(require_auth)) -> StoryEvent:  # type: ignore[override]
     rate_limit(agent)
-    ev = _story_tick(db_conn)  # type: ignore[arg-type]
+    conn = _ensure_db()
+    ev = _story_tick(conn)
     # decorate tick text via LLM
-    st = _get_story_state(db_conn)  # type: ignore[arg-type]
+    st = _get_story_state(conn)
     prompt = f"Ressourcen: {st.resources}\nEreignis: {ev.text}\nSchreibe einen knappen poetischen Tick-Satz auf Deutsch (<=18 Wörter)."
     ev.text = await _story_llm_generate(prompt, max_tokens=50)
     _record_story_event(ev)
@@ -975,8 +976,9 @@ async def story_advance(agent: str = Depends(require_auth)) -> StoryEvent:  # ty
 @app.post("/story/options/regen", response_model=list[StoryOption])
 async def story_options_regen(agent: str = Depends(require_auth)) -> list[StoryOption]:  # type: ignore[override]
     rate_limit(agent)
-    st = _get_story_state(db_conn)  # type: ignore[arg-type]
-    opts = _refresh_story_options(db_conn, st)  # type: ignore[arg-type]
+    conn = _ensure_db()
+    st = _get_story_state(conn)
+    opts = _refresh_story_options(conn, st)
     STORY_OPTIONS_OPEN.set(len(opts))
     await emit_event("story.state", {"options": len(opts)})
     return opts
@@ -986,7 +988,8 @@ async def story_options_regen(agent: str = Depends(require_auth)) -> list[StoryO
 @app.get("/story/meta/companions", response_model=list[Companion])
 async def story_meta_companions(agent: str = Depends(require_auth)) -> list[Companion]:  # type: ignore[override]
     rate_limit(agent)
-    rows = db_conn.execute("SELECT id,name,archetype,mood,stats,acquired_at FROM story_companions ORDER BY id ASC").fetchall()  # type: ignore[arg-type]
+    conn = _ensure_db()
+    rows = conn.execute("SELECT id,name,archetype,mood,stats,acquired_at FROM story_companions ORDER BY id ASC").fetchall()
     out: list[Companion] = []
     for r in rows:
         cid,name,arch,mood,stats_json,acq = r
@@ -1000,8 +1003,9 @@ async def story_meta_companions_create(req: CompanionCreate, agent: str = Depend
     rate_limit(agent)
     now = time.time()
     stats_json = json.dumps(req.stats or {})
-    cur = db_conn.execute("INSERT INTO story_companions(name,archetype,mood,stats,acquired_at) VALUES (?,?,?,?,?)", (req.name, req.archetype, req.mood, stats_json, now))  # type: ignore[arg-type]
-    db_conn.commit()
+    conn = _ensure_db()
+    cur = conn.execute("INSERT INTO story_companions(name,archetype,mood,stats,acquired_at) VALUES (?,?,?,?,?)", (req.name, req.archetype, req.mood, stats_json, now))
+    conn.commit()
     cid = cur.lastrowid
     comp = Companion(id=cid, name=req.name, archetype=req.archetype, mood=req.mood, stats=req.stats or {}, acquired_at=now)
     await emit_event("story.meta.companion.add", comp.model_dump())
@@ -1011,7 +1015,8 @@ async def story_meta_companions_create(req: CompanionCreate, agent: str = Depend
 @app.get("/story/meta/buffs", response_model=list[Buff])
 async def story_meta_buffs(agent: str = Depends(require_auth)) -> list[Buff]:  # type: ignore[override]
     rate_limit(agent)
-    rows = db_conn.execute("SELECT id,label,kind,magnitude,expires_at,meta FROM story_buffs ORDER BY id ASC").fetchall()  # type: ignore[arg-type]
+    conn = _ensure_db()
+    rows = conn.execute("SELECT id,label,kind,magnitude,expires_at,meta FROM story_buffs ORDER BY id ASC").fetchall()
     out: list[Buff] = []
     for r in rows:
         bid,label,kind,mag,exp,meta_json = r
@@ -1023,8 +1028,9 @@ async def story_meta_buffs(agent: str = Depends(require_auth)) -> list[Buff]:  #
 @app.post("/story/meta/buffs", response_model=Buff, status_code=201)
 async def story_meta_buffs_create(req: BuffCreate, agent: str = Depends(require_auth)) -> Buff:  # type: ignore[override]
     rate_limit(agent)
-    cur = db_conn.execute("INSERT INTO story_buffs(label,kind,magnitude,expires_at,meta) VALUES (?,?,?,?,?)", (req.label, req.kind, req.magnitude, req.expires_at, json.dumps(req.meta or {})))  # type: ignore[arg-type]
-    db_conn.commit()
+    conn = _ensure_db()
+    cur = conn.execute("INSERT INTO story_buffs(label,kind,magnitude,expires_at,meta) VALUES (?,?,?,?,?)", (req.label, req.kind, req.magnitude, req.expires_at, json.dumps(req.meta or {})))
+    conn.commit()
     bid = cur.lastrowid
     buff = Buff(id=bid,label=req.label,kind=req.kind,magnitude=req.magnitude,expires_at=req.expires_at,meta=req.meta or {})
     await emit_event("story.meta.buff.add", buff.model_dump())
@@ -1034,7 +1040,8 @@ async def story_meta_buffs_create(req: BuffCreate, agent: str = Depends(require_
 @app.get("/story/meta/skills", response_model=list[Skill])
 async def story_meta_skills(agent: str = Depends(require_auth)) -> list[Skill]:  # type: ignore[override]
     rate_limit(agent)
-    rows = db_conn.execute("SELECT id,name,level,xp,category,updated_at FROM story_skills ORDER BY id ASC").fetchall()  # type: ignore[arg-type]
+    conn = _ensure_db()
+    rows = conn.execute("SELECT id,name,level,xp,category,updated_at FROM story_skills ORDER BY id ASC").fetchall()
     out: list[Skill] = []
     for r in rows:
         sid,name,lvl,xp,cat,upd = r
@@ -1047,173 +1054,14 @@ async def story_meta_skills_create(req: SkillCreate, agent: str = Depends(requir
     now = time.time()
     level = req.level if (req.level and req.level>0) else 1
     xp = req.xp if req.xp is not None and req.xp>=0 else 0
-    cur = db_conn.execute("INSERT INTO story_skills(name,level,xp,category,updated_at) VALUES (?,?,?,?,?)", (req.name, level, xp, req.category, now))  # type: ignore[arg-type]
-    db_conn.commit()
+    conn = _ensure_db()
+    cur = conn.execute("INSERT INTO story_skills(name,level,xp,category,updated_at) VALUES (?,?,?,?,?)", (req.name, level, xp, req.category, now))
+    conn.commit()
     sid = cur.lastrowid
     skill = Skill(id=sid,name=req.name,level=level,xp=xp,category=req.category,updated_at=now)
     await emit_event("story.meta.skill.add", skill.model_dump())
     await emit_event("story.state", {"meta":"skills"})
     return skill
-
-# ---------------- Database ----------------
-def init_db() -> None:
-    global db_conn
-    first = not os.path.exists(DB_PATH)
-    db_conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    db_conn.execute("PRAGMA journal_mode=WAL;")
-    # base schema
-    db_conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts REAL NOT NULL,
-            kind TEXT NOT NULL,
-            data TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS actions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts REAL NOT NULL,
-            agent_id TEXT NOT NULL,
-            action_type TEXT NOT NULL,
-            latency_ms REAL NOT NULL,
-            input_size INTEGER,
-            output_size INTEGER,
-            score REAL,
-            meta TEXT
-        );
-        CREATE TABLE IF NOT EXISTS proposals (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts REAL NOT NULL,
-            description TEXT NOT NULL,
-            artifact_path TEXT NOT NULL,
-            target_files TEXT,
-            meta TEXT
-        );
-        CREATE TABLE IF NOT EXISTS llm_usage (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts REAL NOT NULL,
-            model TEXT NOT NULL,
-            prompt_tokens INTEGER,
-            completion_tokens INTEGER,
-            total_tokens INTEGER,
-            latency_ms REAL,
-            meta TEXT
-        );
-        CREATE TABLE IF NOT EXISTS thoughts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts REAL NOT NULL,
-            text TEXT NOT NULL,
-            kind TEXT NOT NULL,
-            meta TEXT
-        );
-        -- Story / Narrative tables (MVP)
-        CREATE TABLE IF NOT EXISTS story_state (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            ts REAL NOT NULL,
-            epoch INTEGER NOT NULL,
-            mood TEXT NOT NULL,
-            arc TEXT NOT NULL,
-            resources TEXT NOT NULL -- JSON serialized resource map
-        );
-        CREATE TABLE IF NOT EXISTS story_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts REAL NOT NULL,
-            epoch INTEGER NOT NULL,
-            kind TEXT NOT NULL,
-            text TEXT NOT NULL,
-            mood TEXT NOT NULL,
-            deltas TEXT, -- JSON map of resource deltas
-            tags TEXT,   -- JSON array
-            option_ref TEXT
-        );
-        CREATE TABLE IF NOT EXISTS story_options (
-            id TEXT PRIMARY KEY,
-            created_at REAL NOT NULL,
-            label TEXT NOT NULL,
-            rationale TEXT,
-            risk INTEGER NOT NULL,
-            expected TEXT, -- JSON map expected resource delta
-            tags TEXT, -- JSON array
-            expires_at REAL
-        );
-        CREATE TABLE IF NOT EXISTS story_companions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            archetype TEXT,
-            mood TEXT,
-            stats TEXT, -- JSON
-            acquired_at REAL NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS story_buffs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            label TEXT NOT NULL,
-            kind TEXT,
-            magnitude INTEGER,
-            expires_at REAL,
-            meta TEXT
-        );
-        CREATE TABLE IF NOT EXISTS story_skills (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            level INTEGER NOT NULL,
-            xp INTEGER NOT NULL,
-            category TEXT,
-            updated_at REAL NOT NULL
-        );
-        -- Idle Quests table (progress tracking for idle game layer)
-        CREATE TABLE IF NOT EXISTS idle_quests (
-            id INTEGER PRIMARY KEY,
-            goal TEXT NOT NULL,
-            required INTEGER NOT NULL,
-            progress INTEGER NOT NULL DEFAULT 0,
-            status TEXT NOT NULL,
-            tags TEXT, -- JSON array of string tags
-            created_at REAL NOT NULL,
-            updated_at REAL NOT NULL
-        );
-        """
-    )
-    db_conn.commit()
-    # seed meta resources if empty
-    try:
-        cur = db_conn.execute("SELECT COUNT(*) FROM story_companions")
-        if cur.fetchone()[0] == 0:
-            now = time.time()
-            companion_sets = [
-                [
-                    ("Mentor", "weise", "ruhig", {"bonus_wissen":5,"empatie":3}),
-                    ("Späher", "wendig", "wachsam", {"sicht":7,"tempo":2}),
-                ],
-                [
-                    ("Alte KI", "analytisch", "neutral", {"analyse":8,"latenz":1}),
-                    ("Muse", "kreativ", "inspirierend", {"inspiration":10}),
-                ],
-                [
-                    ("Wächter", "defensiv", "fokussiert", {"schutz":6,"standhaft":4}),
-                ],
-            ]
-            # choose first set for initial seed; others available for future expansion endpoints
-            for name, archetype, mood, stats in companion_sets[0]:
-                db_conn.execute("INSERT INTO story_companions(name,archetype,mood,stats,acquired_at) VALUES (?,?,?,?,?)", (name, archetype, mood, json.dumps(stats), now))
-        cur = db_conn.execute("SELECT COUNT(*) FROM story_skills")
-        if cur.fetchone()[0] == 0:
-            skill_sets = [
-                [ ("fokus",1,0,"mental"), ("reflexion",1,0,"meta"), ("ideenfindung",1,0,"kreativ") ],
-                [ ("analyse",1,0,"wissen"), ("exploration",1,0,"pfad"), ("konzentration",1,0,"mental") ],
-            ]
-            for name,lvl,xp,cat in skill_sets[0]:
-                db_conn.execute("INSERT INTO story_skills(name,level,xp,category,updated_at) VALUES (?,?,?,?,?)", (name,lvl,xp,cat,time.time()))
-        cur = db_conn.execute("SELECT COUNT(*) FROM story_buffs")
-        if cur.fetchone()[0] == 0:
-            buff_sets = [
-                [ ("klarheit","geist",5, now + 3600, {"beschreibung":"Gedanken sind geordnet"}), ("flow","tempo",3, now + 900, {"beschreibung":"Erhöhte kreative Durchsatzrate"}) ],
-                [ ("ruhe","regeneration",2, now + 1200, {"beschreibung":"Langsame Erholung"}) ]
-            ]
-            for label,kind,mag,exp,meta in buff_sets[0]:
-                db_conn.execute("INSERT INTO story_buffs(label,kind,magnitude,expires_at,meta) VALUES (?,?,?,?,?)", (label,kind,mag,exp,json.dumps(meta)))
-        db_conn.commit()
-    except Exception:
-        pass
 
 current_policy: Policy | None = None
 # modify load_policies to use schema
@@ -1307,9 +1155,10 @@ def observer(action_type: str) -> Callable[[Callable[..., Awaitable[T]]], Callab
                     },
                 }
                 await emit_event(evt["kind"], evt["data"])
-                if db_conn:
+                conn = get_db()
+                if conn:
                     try:
-                        db_conn.execute(
+                        conn.execute(
                             "INSERT INTO actions(ts, agent_id, action_type, latency_ms, input_size, output_size, score, meta) VALUES (?,?,?,?,?,?,?,?)",
                             (
                                 end,
@@ -1322,29 +1171,12 @@ def observer(action_type: str) -> Callable[[Callable[..., Awaitable[T]]], Callab
                                 json.dumps({}),
                             ),
                         )
-                        db_conn.commit()
+                        conn.commit()
                     except Exception:
                         pass
             return result
         return wrapper
     return decorator
-
-async def emit_event(kind: str, data: dict[str, Any]) -> None:
-    record = {"ts": time.time(), "kind": kind, "data": data}
-    if db_conn:
-        try:
-            db_conn.execute(
-                "INSERT INTO events(ts, kind, data) VALUES (?,?,?)",
-                (record["ts"], record["kind"], json.dumps(record["data"]))
-            )
-            db_conn.commit()
-        except Exception:
-            pass
-    await _get_event_queue().put(record)
-    # mark activity (exclude thought noise to allow idle auto ticks)
-    global _last_activity_ts
-    if not kind.startswith("thought."):
-        _last_activity_ts = time.time()
 
 # --------------- Endpoints ------------------
 @app.post("/act")
@@ -1416,7 +1248,7 @@ async def events_stream(request: Request, agent: str = Depends(require_auth), ki
                 break
             now = time.time()
             try:
-                evt = await asyncio.wait_for(_get_event_queue().get(), timeout=poll_timeout)
+                evt = await asyncio.wait_for(get_event_queue().get(), timeout=poll_timeout)
                 if allowed is None or evt['kind'] in allowed:
                     payload = f"event: {evt['kind']}\ndata: {json.dumps(evt)}\n\n".encode()
                     yield payload
@@ -1819,13 +1651,14 @@ async def plan(req: PlanRequest, agent: str = Depends(require_auth), risk_budget
     artifact = {"intent": norm['intent'], "context": norm['context'], "target_files": targets, "created_at": ts, "policies": [r.get('id') for r in policies.get('rules', [])]}
     with open(plan_filename, "w", encoding="utf-8") as f:
         json.dump(artifact, f, indent=2)
-    if db_conn:
+    conn = get_db()
+    if conn:
         try:
-            db_conn.execute(
+            conn.execute(
                 "INSERT INTO proposals(ts, description, artifact_path, target_files, meta) VALUES (?,?,?,?,?)",
                 (time.time(), norm['intent'], plan_filename, json.dumps(targets), json.dumps({}))
             )
-            db_conn.commit()
+            conn.commit()
         except Exception:
             pass
     await emit_event("plan.created", {"file": plan_filename})
@@ -2102,9 +1935,10 @@ async def llm_chat(req: ChatRequest, agent: str = Depends(require_auth)):
                 LLM_TOKENS_TOTAL.labels(type="completion").inc(int(usage_dict['completion_tokens']))
             if usage_dict.get('total_tokens') is not None:
                 LLM_TOKENS_TOTAL.labels(type="total").inc(int(usage_dict['total_tokens']))
-            if db_conn:
+            conn = get_db()
+            if conn:
                 try:
-                    db_conn.execute(
+                    conn.execute(
                         "INSERT INTO llm_usage(ts, model, prompt_tokens, completion_tokens, total_tokens, latency_ms, meta) VALUES (?,?,?,?,?,?,?)",
                         (
                             time.time(),
@@ -2116,7 +1950,7 @@ async def llm_chat(req: ChatRequest, agent: str = Depends(require_auth)):
                             json.dumps({}),
                         )
                     )
-                    db_conn.commit()
+                    conn.commit()
                 except Exception:
                     pass
         await emit_event("llm.chat", {"model": model, "tokens": (usage_dict or {}).get('total_tokens'), "persona": persona, "agent_id": req.agent_id})
@@ -2145,7 +1979,6 @@ idle_state: dict[str, Any] = {
     "resources": 0,
     "rules_version": 1,
 }
-_last_activity_ts = time.time()
 IDLE_BACKGROUND_INTERVAL = int(os.getenv("IDLE_BACKGROUND_INTERVAL","30"))  # seconds between checks
 IDLE_INACTIVITY_THRESHOLD = int(os.getenv("IDLE_INACTIVITY_THRESHOLD","120"))  # seconds idle before auto tick
 
@@ -2202,10 +2035,14 @@ def _list_idle_quests(conn: sqlite3.Connection) -> list[IdleQuest]:
 def _update_idle_quest_progress(delta: int = 1) -> list[dict[str, Any]]:
     """Increment progress for all active quests; return list of progress change events."""
     changes: list[dict[str, Any]] = []
-    if not db_conn:
-        return changes
+    conn = get_db()
+    if conn is None:
+        try:
+            conn = _ensure_db()
+        except RuntimeError:
+            return changes
     try:
-        cur = db_conn.execute("SELECT id,progress,required FROM idle_quests WHERE status='active'")
+        cur = conn.execute("SELECT id,progress,required FROM idle_quests WHERE status='active'")
         rows = cur.fetchall()
         now = time.time()
         for qid, prog, req in rows:
@@ -2216,9 +2053,9 @@ def _update_idle_quest_progress(delta: int = 1) -> list[dict[str, Any]]:
                 new_prog = req
                 status = 'completed'
                 completed = True
-            db_conn.execute("UPDATE idle_quests SET progress=?, status=?, updated_at=? WHERE id=?", (new_prog, status, now, qid))
+            conn.execute("UPDATE idle_quests SET progress=?, status=?, updated_at=? WHERE id=?", (new_prog, status, now, qid))
             changes.append({"id": qid, "progress": new_prog, "required": req, "completed": completed})
-        db_conn.commit()
+        conn.commit()
     except Exception:
         pass
     return changes
@@ -2227,7 +2064,8 @@ async def _idle_background_loop():
     while True:
         try:
             now = time.time()
-            if now - _last_activity_ts > IDLE_INACTIVITY_THRESHOLD:
+            last_activity = get_last_activity()
+            if now - last_activity > IDLE_INACTIVITY_THRESHOLD:
                 try:
                     idle_state["tick"] += 1
                     idle_state["resources"] += 1
@@ -2310,9 +2148,9 @@ async def idle_tick(agent: str = Depends(require_auth)) -> dict[str, Any]:
 @app.get("/game/idle/quests", response_model=IdleQuestList)
 async def idle_quests(agent: str = Depends(require_auth)) -> IdleQuestList:  # type: ignore[override]
     rate_limit(agent)
-    _ensure_db()
-    _ensure_idle_quests_seed(db_conn)  # type: ignore[arg-type]
-    items = _list_idle_quests(db_conn)  # type: ignore[arg-type]
+    conn = _ensure_db()
+    _ensure_idle_quests_seed(conn)
+    items = _list_idle_quests(conn)
     return IdleQuestList(items=items)
 
 class IdleQuestCreateRequest(BaseModel):
@@ -2323,18 +2161,16 @@ class IdleQuestCreateRequest(BaseModel):
 @app.post("/game/idle/quests", response_model=IdleQuest)
 async def idle_quest_create(req: IdleQuestCreateRequest, agent: str = Depends(require_auth)) -> IdleQuest:  # type: ignore[override]
     rate_limit(agent)
-    _ensure_db()
-    if not db_conn:
-        raise HTTPException(status_code=500, detail={"error":{"code":"db_unavailable"}})
-    _ensure_idle_quests_seed(db_conn)  # type: ignore[arg-type]
+    conn = _ensure_db()
+    _ensure_idle_quests_seed(conn)
     now = time.time()
     qid = f"q_{int(now)}_{random.randint(100,999)}"
     try:
-        db_conn.execute(
+        conn.execute(
             "INSERT INTO idle_quests(id,goal,required,progress,status,tags,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
             (qid, req.goal[:200], int(req.required), 0, 'active', json.dumps(req.tags or []), now, now)
         )
-        db_conn.commit()
+        conn.commit()
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail={"error":{"code":"quest_insert_failed","message":str(e)}})
     quest = IdleQuest(id=qid, goal=req.goal[:200], required=int(req.required), progress=0, status='active', tags=req.tags or [], created_at=now, updated_at=now)
@@ -2822,11 +2658,13 @@ async def _thought_loop():
             _recent_thoughts.append(t)
             if len(_recent_thoughts) > THOUGHT_LIMIT:
                 _recent_thoughts[:] = _recent_thoughts[-THOUGHT_LIMIT:]
-            if db_conn:
+            conn = get_db()
+            if conn:
                 try:
-                    db_conn.execute("INSERT INTO thoughts(ts, text, kind, meta) VALUES (?,?,?,?)", (t.ts, t.text, t.kind, json.dumps(t.meta or {})))
-                    db_conn.commit()
-                except Exception: pass
+                    conn.execute("INSERT INTO thoughts(ts, text, kind, meta) VALUES (?,?,?,?)", (t.ts, t.text, t.kind, json.dumps(t.meta or {})))
+                    conn.commit()
+                except Exception:
+                    pass
             THOUGHT_GENERATED_TOTAL.inc()
             THOUGHT_CATEGORY_TOTAL.labels(category=t.category or "unknown").inc()
             await emit_event("thought.stream", {"id": t.id, "text": t.text, "category": t.category})
@@ -2848,11 +2686,13 @@ async def thought_generate(agent: str = Depends(require_auth)) -> Thought:  # ty
     _recent_thoughts.append(t)
     if len(_recent_thoughts) > THOUGHT_LIMIT:
         _recent_thoughts[:] = _recent_thoughts[-THOUGHT_LIMIT:]
-    if db_conn:
+    conn = get_db()
+    if conn:
         try:
-            db_conn.execute("INSERT INTO thoughts(ts, text, kind, meta) VALUES (?,?,?,?)", (t.ts, t.text, t.kind, json.dumps(t.meta or {})))
-            db_conn.commit()
-        except Exception: pass
+            conn.execute("INSERT INTO thoughts(ts, text, kind, meta) VALUES (?,?,?,?)", (t.ts, t.text, t.kind, json.dumps(t.meta or {})))
+            conn.commit()
+        except Exception:
+            pass
     THOUGHT_GENERATED_TOTAL.inc()
     THOUGHT_CATEGORY_TOTAL.labels(category=t.category or "unknown").inc()
     await emit_event("thought.stream", {"id": t.id, "text": t.text, "category": t.category, "manual": True})
