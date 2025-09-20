@@ -6,6 +6,8 @@ Self-Observing Life-Agent Development Environment (MVP).
 
 Hinweis/Quick Links:
 - PR-Roadmap & Leitplanken: siehe [copilot-instructions.md](./copilot-instructions.md)
+- Architekturüberblick: siehe [docs/architecture.md](./docs/architecture.md)
+- Test-Guide (pytest, E2E Vorschlag): [docs/testing.md](./docs/testing.md)
 
 ## Kurz erklärt
 Ein kleiner Server mit UI, der Pläne baut, sich selbst beobachtet und sich per Regeln steuern lässt. In der Web-UI siehst du Meta/LLM-Infos, eine Plan-Demo, einen LLM-Chat (sparsam) sowie Live-Bereiche für Events & Metrics.
@@ -167,6 +169,27 @@ Antwort (Dry-Run): `{ "status": "dry-run", "branch": "plan/demo-feature-20250110
 
 ### Architekturfluss
 Intent → Plan (Varianten) → Auswahl (Slider) → Optionaler Review & Patch-Vorschau → PR Erstellung → Review → Merge.
+
+```mermaid
+flowchart LR
+	U[User] --> UI[/Web UI: /story/ui/]
+	subgraph Browser/Webview
+		UI -- "EventSource ?key" --> SSE{{/events}}
+		UI -- "fetch X-API-Key" --> API[(FastAPI App)]
+	end
+	subgraph Backend
+		API --> MET[/metrics/]
+		API --> DB[(SQLite)]
+		API --> AR[plans/\n suggestions/]
+		API --> SSE
+	end
+	subgraph VSCode
+		EXT[Extension] --> UI
+		EXT --> WD[Watchdog]
+	end
+	WD --> UV[Uvicorn]
+	UV --> API
+```
 
 ### Variante wählen (UI)
 - Slider löst internes Event `variant.selected` aus (lokale Badge Aktualisierung)

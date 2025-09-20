@@ -1,0 +1,77 @@
+# Page snapshot
+
+```yaml
+- generic [ref=e1]:
+  - 'heading "Story Neue UI • Beta [SSE: init] [Key: ?] [meta: ?] [llm: ?] [policy: ?] [privat]" [level=1] [ref=e2]':
+    - text: Story
+    - generic [ref=e3]: Neue UI • Beta
+    - generic [ref=e4]: "[SSE: init]"
+    - generic [ref=e5]: "[Key: ?]"
+    - generic [ref=e6]: "[meta: ?]"
+    - generic [ref=e7]: "[llm: ?]"
+    - generic [ref=e8]: "[policy: ?]"
+    - generic [ref=e9]: "[privat]"
+  - generic [ref=e10]:
+    - generic [ref=e11]:
+      - button "Übersicht öffnen" [active] [ref=e12] [cursor=pointer]: Dashboard
+      - button "Story öffnen" [ref=e13] [cursor=pointer]: Story
+      - button "Vorschläge öffnen" [ref=e14] [cursor=pointer]: Suggestions
+      - button "Plan nach PR öffnen" [ref=e15] [cursor=pointer]: Plan → PR
+      - button "Policies öffnen" [ref=e16] [cursor=pointer]: Policies
+    - generic [ref=e17]:
+      - generic [ref=e18]: "SSE: ?"
+      - generic [ref=e19]: "/metrics: ?"
+      - generic [ref=e20]: "Vorschläge: ?"
+      - button "API Key ändern" [ref=e21] [cursor=pointer]: Key ändern
+  - generic [ref=e23]:
+    - generic [ref=e25]:
+      - text: E-Mail
+      - textbox "E-Mail" [ref=e26]
+    - generic [ref=e28]:
+      - text: Passwort
+      - textbox "Passwort" [ref=e29]
+    - generic [ref=e30]:
+      - button "Login" [ref=e31] [cursor=pointer]
+      - button "Registrieren" [ref=e32] [cursor=pointer]
+  - button "Hilfe öffnen" [ref=e33] [cursor=pointer]: "?"
+  - generic [ref=e35]:
+    - generic [ref=e36]:
+      - generic [ref=e37]:
+        - heading "Zustand" [level=2] [ref=e38]
+        - generic [ref=e39]: lade...
+        - generic [ref=e40]:
+          - group [ref=e41]
+          - group [ref=e43]
+          - group [ref=e45]
+      - generic [ref=e47]:
+        - heading "Stil & Ereignisse" [level=2] [ref=e48]
+        - generic [ref=e49]:
+          - generic [ref=e50]:
+            - text: Ton
+            - textbox "Ton" [ref=e51]
+          - generic [ref=e52]:
+            - text: Temperatur (0.0–1.0)
+            - spinbutton "Temperatur (0.0–1.0)" [ref=e53]
+        - generic [ref=e54]:
+          - generic [ref=e55]:
+            - text: Stimme
+            - combobox "Stimme" [ref=e56]
+          - button "Stil speichern" [ref=e57] [cursor=pointer]
+        - generic [ref=e59]:
+          - generic [ref=e60]:
+            - checkbox "Zufallsereignisse aktiv" [ref=e61]
+            - text: Zufallsereignisse aktiv
+          - generic [ref=e62]:
+            - text: Wahrscheinlichkeit
+            - spinbutton "Wahrscheinlichkeit" [ref=e63]
+          - button "Ereignisse speichern" [ref=e64] [cursor=pointer]
+      - generic [ref=e65]:
+        - heading "Aktion" [level=2] [ref=e66]
+        - textbox "Freitext" [ref=e67]
+        - button "Freitext senden" [ref=e68] [cursor=pointer]
+        - button "Zeit voranschreiten" [ref=e69] [cursor=pointer]
+        - button "Optionen neu" [ref=e70] [cursor=pointer]
+    - generic [ref=e72]:
+      - heading "Log" [level=2] [ref=e73]
+      - textbox "Filter (Regex / Text)" [ref=e74]
+```
