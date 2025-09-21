@@ -363,11 +363,6 @@ PLAN_VARIANT_GENERATED_TOTAL = Counter(
 SSE_QUEUE_DROPPED_TOTAL = Counter("sse_queue_dropped_total", "Dropped SSE events due to queue overflow", registry=REGISTRY)
 
 # ---- Balance Parameter (env overrides) ----
-XP_BASE = float(os.getenv("STORY_XP_BASE", "80"))
-XP_EXP = float(os.getenv("STORY_XP_EXP", "1.4"))
-INSP_TICK_THRESHOLD = int(os.getenv("STORY_INSP_TICK_THRESHOLD", "120"))
-INSP_SOFT_CAP = int(os.getenv("STORY_INSP_SOFT_CAP", "150"))
-INSP_MIN_ENERGY = int(os.getenv("STORY_INSP_MIN_ENERGY", "10"))
 
 RISK_PATTERNS = [r"\b(os\.system|subprocess\.)", r"\.\./", r"/etc/passwd", r"\b(?:ssh|https?|ftp)://", r"(?i)api[_-]?key", r"(?i)\b(token|secret)\b"]
 
@@ -799,11 +794,7 @@ class QuestListResponse(BaseModel):
 from .story_core import (
     StoryOption, StoryEvent, StoryState,
     Companion, CompanionCreate, Buff, BuffCreate, Skill, SkillCreate,
-    eval_arc as _core_eval_arc,
-    maybe_arc_shift as _core_maybe_arc_shift,
     get_story_state as _get_story_state,
-    list_story_options as _list_story_options,
-    generate_story_options as _generate_story_options,
     persist_options as _persist_options,
     refresh_story_options as _refresh_story_options,
     apply_story_option as _apply_story_option,
@@ -813,206 +804,6 @@ from .story_core import (
 
 def _story_now() -> float:
     return time.time()
-
-## Story logic now imported from story_core
-
-def _list_story_options(conn: sqlite3.Connection) -> list[StoryOption]:
-    cur = conn.execute("SELECT id, label, rationale, risk, expected, tags, expires_at FROM story_options ORDER BY created_at DESC")
-    out: list[StoryOption] = []
-    now = _story_now()
-    for row in cur.fetchall():
-        oid, label, rationale, risk, expected_json, tags_json, expires_at = row
-        if expires_at and expires_at < now:
-            continue
-        expected: dict[str, int] | None
-        if expected_json:
-            try:
-                raw = json.loads(expected_json)
-                if isinstance(raw, dict):
-                    expected = {str(k): int(v) for k, v in raw.items() if isinstance(v, (int, float))}
-                else:
-                    expected = None
-            except Exception:
-                expected = None
-        else:
-            expected = None
-        tags: list[str]
-        if tags_json:
-            try:
-                raw_t = json.loads(tags_json)
-                if isinstance(raw_t, list):
-                    tags = [str(t) for t in raw_t]
-                else:
-                    tags = []
-            except Exception:
-                tags = []
-        else:
-            tags = []
-        out.append(StoryOption(id=oid, label=label, rationale=rationale, risk=risk, expected=expected, tags=tags, expires_at=expires_at))
-    return out
-
-def _generate_story_options(state: StoryState) -> list[StoryOption]:
-    opts: list[StoryOption] = []
-    res = state.resources
-    # heuristic examples
-    if res.get("energie", 0) < 40:
-        opts.append(
-            StoryOption(
-                id=f"opt_rest_{int(_story_now())}",
-                label="Meditieren und Energie sammeln",
-                rationale="Niedrige Energie erkannt",
-                risk=0,
-                expected={"energie": +15, "inspiration": +2},
-                tags=["resource:energie"],
-            )
-        )
-    if res.get("inspiration", 0) > 10 and res.get("wissen", 0) < 50:
-        opts.append(
-            StoryOption(
-                id=f"opt_write_{int(_story_now())}",
-                label="Ideen schriftlich strukturieren",
-                rationale="Inspiration in Wissen umwandeln",
-                risk=1,
-                expected={"inspiration": -5, "wissen": +8, "erfahrung": +5},
-                tags=["convert", "resource:wissen"],
-            )
-        )
-    # progressive XP curve (env driven)
-    _lvl = state.resources.get("level", 1)
-    xp_needed = int((_lvl ** XP_EXP) * XP_BASE)
-    if res.get("erfahrung", 0) >= xp_needed:
-        xp_cost = xp_needed
-        opts.append(
-            StoryOption(
-                id=f"opt_level_{int(_story_now())}",
-                label="Reflektion und Level-Aufstieg",
-                rationale="Erfahrungsschwelle erreicht",
-                risk=1,
-                expected={"erfahrung": -xp_cost, "level": +1, "stabilitaet": +5, "inspiration": +3},
-                tags=["levelup"],
-            )
-        )
-    # fallback
-    if not opts:
-        opts.append(
-            StoryOption(
-                id=f"opt_explore_{int(_story_now())}",
-                label="Neuen Gedankenpfad erkunden",
-                rationale="Kein dringendes Bedürfnis",
-                risk=1,
-                expected={"inspiration": +5, "energie": -5, "erfahrung": +3},
-                tags=["explore"],
-            )
-        )
-    return opts
-
-def _persist_options(conn: sqlite3.Connection, options: list[StoryOption]) -> None:
-    now = _story_now()
-    for o in options:
-        conn.execute("INSERT OR REPLACE INTO story_options(id, created_at, label, rationale, risk, expected, tags, expires_at) VALUES (?,?,?,?,?,?,?,?)",
-                     (o.id, now, o.label, o.rationale, o.risk, json.dumps(o.expected) if o.expected else None, json.dumps(o.tags), o.expires_at))
-    conn.commit()
-
-def _refresh_story_options(conn: sqlite3.Connection, state: StoryState) -> list[StoryOption]:
-    # clear existing (simple strategy MVP)
-    conn.execute("DELETE FROM story_options")
-    opts = _generate_story_options(state)
-    # Mentor (Gefährte) senkt Risiko aller Optionen leicht
-    try:
-        cur = conn.execute("SELECT name FROM story_companions")
-        names = {str(r[0]).lower() for r in cur.fetchall()}
-        if any(n.startswith("mentor") for n in names):
-            for o in opts:
-                if o.risk > 0:
-                    o.risk -= 1
-                if "mentor" not in o.tags:
-                    o.tags.append("mentor")
-    except Exception:
-        pass
-    _persist_options(conn, opts)
-    return opts
-
-def _apply_story_option(conn: sqlite3.Connection, state: StoryState, option_id: str) -> StoryEvent:
-    cur = conn.execute("SELECT id, label, rationale, risk, expected FROM story_options WHERE id=?", (option_id,))
-    row = cur.fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail={"error": {"code": "story.option_not_found", "message": "Option nicht gefunden"}})
-    _, label, rationale, risk, expected_json = row
-    expected: dict[str, int] = {}
-    if expected_json:
-        try:
-            raw = json.loads(expected_json)
-            if isinstance(raw, dict):
-                for k, v in raw.items():
-                    if isinstance(v, (int, float)):
-                        expected[str(k)] = int(v)
-        except Exception:
-            expected = {}
-    # apply delta
-    new_resources = dict(state.resources)
-    deltas: dict[str,int] = {}
-    # Mindest-Erfahrungsgewinn skaliert nach Risiko, falls Option keinen XP Effekt hat
-    if "erfahrung" not in expected:
-        base_xp = max(1, risk)
-        expected["erfahrung"] = base_xp
-    for k, delta in expected.items():
-        before = new_resources.get(k, 0)
-        after = before + delta
-        new_resources[k] = after
-        deltas[k] = delta
-    epoch = int(getattr(state, 'epoch', 0)) + 1
-    mood = state.mood
-    # simple mood tweak
-    if deltas.get("energie",0) > 0:
-        mood = "calm"
-    if deltas.get("inspiration",0) > 0:
-        mood = "curious"
-    # possible arc shift before commit
-    new_arc = _core_eval_arc(new_resources, state.arc)
-    conn.execute("UPDATE story_state SET ts=?, epoch=?, mood=?, arc=?, resources=? WHERE id=1", (_story_now(), epoch, mood, new_arc, json.dumps(new_resources)))
-    ev_id = f"sev_{int(_story_now()*1000)}"
-    conn.execute("INSERT INTO story_events(ts, epoch, kind, text, mood, deltas, tags, option_ref) VALUES (?,?,?,?,?,?,?,?)", (_story_now(), epoch, "action", label, mood, json.dumps(deltas), json.dumps(["action"]), option_id))
-    arc_event = _core_maybe_arc_shift(conn, state.arc, new_arc, epoch, mood)
-    # refresh options after action
-    conn.execute("DELETE FROM story_options")
-    conn.commit()
-    # return primary event (arc shift will also be in log)
-    return StoryEvent(id=ev_id, ts=_story_now(), epoch=epoch, kind="action", text=label, mood=mood, deltas=deltas, tags=["action"], option_ref=option_id)
-
-def _story_tick(conn: sqlite3.Connection) -> StoryEvent:
-    state = _get_story_state(conn)
-    # passive drift
-    resources = dict(state.resources)
-    resources["energie"] = max(0, resources.get("energie",0) - 1)
-    # Passive Inspiration nur wenn unter Schwelle und genug Energie
-    if resources.get("inspiration",0) < INSP_TICK_THRESHOLD and resources.get("energie",0) > INSP_MIN_ENERGY:
-        resources["inspiration"] = resources.get("inspiration",0) + 1
-    # Soft Cap
-    if resources.get("inspiration",0) > INSP_SOFT_CAP:
-        resources["inspiration"] = INSP_SOFT_CAP
-    epoch = state.epoch + 1
-    mood = state.mood
-    if resources.get("energie",0) < 30:
-        mood = "strained"
-    new_arc = _core_eval_arc(resources, state.arc)
-    conn.execute("UPDATE story_state SET ts=?, epoch=?, mood=?, arc=?, resources=? WHERE id=1", (_story_now(), epoch, mood, new_arc, json.dumps(resources)))
-    ev_id = f"sev_{int(_story_now()*1000)}"
-    text = "Zeit vergeht. Eine stille Verschiebung im inneren Raum."
-    deltas_tick = {"energie": -1}
-    if resources.get("inspiration",0) != state.resources.get("inspiration",0):
-        # inspiration actually increased
-        inc = resources.get("inspiration",0) - state.resources.get("inspiration",0)
-        if inc>0:
-            deltas_tick["inspiration"] = inc
-    conn.execute(
-        "INSERT INTO story_events(ts, epoch, kind, text, mood, deltas, tags, option_ref) VALUES (?,?,?,?,?,?,?,?)",
-        (_story_now(), epoch, "tick", text, mood, json.dumps(deltas_tick), json.dumps(["tick"]), None),
-    )
-    _core_maybe_arc_shift(conn, state.arc, new_arc, epoch, mood)
-    # regenerate options occasionally
-    _refresh_story_options(conn, StoryState(epoch=epoch, mood=mood, arc=state.arc, resources=resources, options=[]))
-    conn.commit()
-    return StoryEvent(id=ev_id, ts=_story_now(), epoch=epoch, kind="tick", text=text, mood=mood, deltas=deltas_tick, tags=["tick"], option_ref=None)
 
 # ---------------- Story LLM Support -----------------
 async def _story_llm_generate(prompt: str, max_tokens: int = 120) -> str:
@@ -1121,16 +912,12 @@ async def story_export(limit: int = 100, agent: str = Depends(require_auth)) -> 
     rate_limit(agent)
     _ensure_db()
     st = _get_story_state(db_conn)  # type: ignore[arg-type]
-    cur = db_conn.execute("SELECT id, ts, epoch, kind, text, mood, deltas, tags, option_ref FROM story_events ORDER BY id DESC LIMIT ?", (limit,))  # type: ignore[arg-type]
-    evs: list[dict[str, Any]] = []
-    for row in cur.fetchall():
-        rid, ts, epoch, kind, text, mood, deltas_json, tags_json, option_ref = row
-        try: deltas = json.loads(deltas_json) if deltas_json else None
-        except Exception: deltas = None
-        try: tags = json.loads(tags_json) if tags_json else []
-        except Exception: tags = []
-        evs.append({"id": rid, "ts": ts, "epoch": epoch, "kind": kind, "text": text, "mood": mood, "deltas": deltas, "tags": tags, "option_ref": option_ref})
-    return {"state": st.model_dump(), "events": list(reversed(evs)), "exported_at": time.time()}
+    events = list(reversed(_story_log(db_conn, limit)))  # type: ignore[arg-type]
+    return {
+        "state": st.model_dump(),
+        "events": [ev.model_dump() for ev in events],
+        "exported_at": time.time(),
+    }
 
 @app.post("/story/reset")
 async def story_reset(agent: str = Depends(require_auth)) -> dict[str, Any]:  # type: ignore[override]
@@ -1152,36 +939,8 @@ async def story_reset(agent: str = Depends(require_auth)) -> dict[str, Any]:  # 
 @app.get("/story/log", response_model=list[StoryEvent])
 async def story_log(limit: int = 50, agent: str = Depends(require_auth)) -> list[StoryEvent]:  # type: ignore[override]
     rate_limit(agent)
-    cur = db_conn.execute("SELECT id, ts, epoch, kind, text, mood, deltas, tags, option_ref FROM story_events ORDER BY id DESC LIMIT ?", (limit,))  # type: ignore[arg-type]
-    out: list[StoryEvent] = []
-    for row in cur.fetchall():
-        rid, ts, epoch, kind, text, mood, deltas_json, tags_json, option_ref = row
-        deltas: dict[str, int] | None
-        if deltas_json:
-            try:
-                raw_d = json.loads(deltas_json)
-                if isinstance(raw_d, dict):
-                    deltas = {str(k): int(v) for k, v in raw_d.items() if isinstance(v, (int, float))}
-                else:
-                    deltas = None
-            except Exception:
-                deltas = None
-        else:
-            deltas = None
-        tags: list[str]
-        if tags_json:
-            try:
-                raw_t = json.loads(tags_json)
-                if isinstance(raw_t, list):
-                    tags = [str(t) for t in raw_t]
-                else:
-                    tags = []
-            except Exception:
-                tags = []
-        else:
-            tags = []
-        out.append(StoryEvent(id=str(rid), ts=ts, epoch=epoch, kind=kind, text=text, mood=mood, deltas=deltas, tags=tags, option_ref=option_ref))
-    return list(reversed(out))
+    events = _story_log(db_conn, limit)  # type: ignore[arg-type]
+    return list(reversed(events))
 
 @app.get("/story/options", response_model=list[StoryOption])
 async def story_options(agent: str = Depends(require_auth)) -> list[StoryOption]:  # type: ignore[override]
@@ -1198,11 +957,23 @@ async def story_action(req: StoryActionRequest, agent: str = Depends(require_aut
     rate_limit(agent)
     st = _get_story_state(db_conn)  # type: ignore[arg-type]
     if req.option_id:
-        ev = _apply_story_option(db_conn, st, req.option_id)  # type: ignore[arg-type]
+        try:
+            ev = _apply_story_option(db_conn, st, req.option_id)  # type: ignore[arg-type]
+        except LookupError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": {"code": "story.option_not_found", "message": "Option nicht gefunden"}},
+            ) from exc
     else:
         # free text becomes a minor inspiration action
         label = req.free_text.strip() if req.free_text else "Freies Nachdenken"
-        ev = _apply_story_option(db_conn, st, _persist_free_action(label))  # pseudo id from helper will raise for now
+        try:
+            ev = _apply_story_option(db_conn, st, _persist_free_action(label))  # type: ignore[arg-type]
+        except LookupError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": {"code": "story.option_not_found", "message": "Option nicht gefunden"}},
+            ) from exc
         # Above placeholder; for MVP we simply create a synthetic event
     # enrich text with LLM
     prompt = f"Aktueller Zustand: Ressourcen={st.resources}\nAktion: {ev.text}\nFormuliere einen kurzen erzählerischen Satz im Präteritum (<=25 Wörter)."

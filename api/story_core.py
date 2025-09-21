@@ -2,8 +2,13 @@
 Minimal refactor: pure functions + dataclasses (pydantic BaseModel) reused by app.
 """
 from __future__ import annotations
-import json, sqlite3, time
+
+import json
+import os
+import sqlite3
+import time
 from typing import Any
+
 from pydantic import BaseModel
 
 # ---------------- Models ----------------
@@ -76,6 +81,12 @@ _STORY_RESOURCE_KEYS = [
 
 _STORY_OLD_KEY_MAP = {"energy":"energie","knowledge":"wissen","stability":"stabilitaet","xp":"erfahrung"}
 
+XP_BASE = float(os.getenv("STORY_XP_BASE", "80"))
+XP_EXP = float(os.getenv("STORY_XP_EXP", "1.4"))
+INSP_TICK_THRESHOLD = int(os.getenv("STORY_INSP_TICK_THRESHOLD", "120"))
+INSP_SOFT_CAP = int(os.getenv("STORY_INSP_SOFT_CAP", "150"))
+INSP_MIN_ENERGY = int(os.getenv("STORY_INSP_MIN_ENERGY", "10"))
+
 # ------------- helpers -------------
 
 def _story_now() -> float: return time.time()
@@ -136,105 +147,352 @@ def get_story_state(conn: sqlite3.Connection) -> StoryState:
     return StoryState(epoch=epoch,mood=mood,arc=arc,resources=resources,options=options,companions=companions,buffs=buffs,skills=skills)
 
 def list_story_options(conn: sqlite3.Connection) -> list[StoryOption]:
-    cur = conn.execute("SELECT id,label,rationale,risk,expected,tags,expires_at FROM story_options ORDER BY created_at DESC")
+    cur = conn.execute(
+        "SELECT id,label,rationale,risk,expected,tags,expires_at FROM story_options ORDER BY created_at DESC"
+    )
     out: list[StoryOption] = []
     now = _story_now()
     for row in cur.fetchall():
-        oid,label,rationale,risk,expected_json,tags_json,expires_at = row
-        if expires_at and expires_at < now: continue
-        expected: dict[str,int] | None = None
+        oid, label, rationale, risk, expected_json, tags_json, expires_at = row
+        if expires_at and expires_at < now:
+            continue
+        expected: dict[str, int] | None = None
         if expected_json:
             try:
-                raw = json.loads(expected_json);
+                raw = json.loads(expected_json)
                 if isinstance(raw, dict):
-                    expected = {str(k):int(v) for k,v in raw.items() if isinstance(v,(int,float))}
-            except Exception: expected=None
+                    expected = {
+                        str(k): int(v)
+                        for k, v in raw.items()
+                        if isinstance(v, (int, float))
+                    }
+            except Exception:
+                expected = None
         tags: list[str] = []
         if tags_json:
             try:
-                raw_t=json.loads(tags_json); tags=[str(t) for t in raw_t] if isinstance(raw_t,list) else []
-            except Exception: tags=[]
-        out.append(StoryOption(id=oid,label=label,rationale=rationale,risk=risk,expected=expected,tags=tags,expires_at=expires_at))
+                raw_t = json.loads(tags_json)
+                if isinstance(raw_t, list):
+                    tags = [str(t) for t in raw_t]
+            except Exception:
+                tags = []
+        out.append(
+            StoryOption(
+                id=oid,
+                label=label,
+                rationale=rationale,
+                risk=int(risk),
+                expected=expected,
+                tags=tags,
+                expires_at=expires_at,
+            )
+        )
     return out
+
 
 def generate_story_options(state: StoryState) -> list[StoryOption]:
     opts: list[StoryOption] = []
-    r=state.resources
-    if r.get("energie",0) < 40:
-        opts.append(StoryOption(id=f"opt_rest_{int(_story_now())}",label="Meditieren und Energie sammeln",rationale="Niedrige Energie erkannt",risk=0,expected={"energie":15,"inspiration":2},tags=["resource:energie"]))
-    if r.get("inspiration",0) > 10 and r.get("wissen",0) < 50:
-        opts.append(StoryOption(id=f"opt_write_{int(_story_now())}",label="Ideen schriftlich strukturieren",rationale="Inspiration in Wissen umwandeln",risk=1,expected={"inspiration":-5,"wissen":8,"erfahrung":5},tags=["convert","resource:wissen"]))
-    if r.get("erfahrung",0) >= (r.get("level",1)*100):
-        xp_cost = r.get("level",1)*100
-        opts.append(StoryOption(id=f"opt_level_{int(_story_now())}",label="Reflektion und Level-Aufstieg",rationale="Erfahrungsschwelle erreicht",risk=1,expected={"erfahrung":-xp_cost,"level":1,"stabilitaet":5},tags=["levelup"]))
+    resources = state.resources
+    if resources.get("energie", 0) < 40:
+        opts.append(
+            StoryOption(
+                id=f"opt_rest_{int(_story_now())}",
+                label="Meditieren und Energie sammeln",
+                rationale="Niedrige Energie erkannt",
+                risk=0,
+                expected={"energie": +15, "inspiration": +2},
+                tags=["resource:energie"],
+            )
+        )
+    if resources.get("inspiration", 0) > 10 and resources.get("wissen", 0) < 50:
+        opts.append(
+            StoryOption(
+                id=f"opt_write_{int(_story_now())}",
+                label="Ideen schriftlich strukturieren",
+                rationale="Inspiration in Wissen umwandeln",
+                risk=1,
+                expected={"inspiration": -5, "wissen": +8, "erfahrung": +5},
+                tags=["convert", "resource:wissen"],
+            )
+        )
+    level = resources.get("level", 1)
+    try:
+        xp_threshold = int((level ** XP_EXP) * XP_BASE)
+    except Exception:
+        xp_threshold = int(level * XP_BASE)
+    if resources.get("erfahrung", 0) >= xp_threshold:
+        xp_cost = xp_threshold
+        opts.append(
+            StoryOption(
+                id=f"opt_level_{int(_story_now())}",
+                label="Reflektion und Level-Aufstieg",
+                rationale="Erfahrungsschwelle erreicht",
+                risk=1,
+                expected={
+                    "erfahrung": -xp_cost,
+                    "level": +1,
+                    "stabilitaet": +5,
+                    "inspiration": +3,
+                },
+                tags=["levelup"],
+            )
+        )
     if not opts:
-        opts.append(StoryOption(id=f"opt_explore_{int(_story_now())}",label="Neuen Gedankenpfad erkunden",rationale="Kein dringendes Bedürfnis",risk=1,expected={"inspiration":5,"energie":-5,"erfahrung":3},tags=["explore"]))
+        opts.append(
+            StoryOption(
+                id=f"opt_explore_{int(_story_now())}",
+                label="Neuen Gedankenpfad erkunden",
+                rationale="Kein dringendes Bedürfnis",
+                risk=1,
+                expected={"inspiration": +5, "energie": -5, "erfahrung": +3},
+                tags=["explore"],
+            )
+        )
     return opts
 
+
 def persist_options(conn: sqlite3.Connection, options: list[StoryOption]) -> None:
-    now=_story_now()
-    for o in options:
-        conn.execute("INSERT OR REPLACE INTO story_options(id, created_at, label, rationale, risk, expected, tags, expires_at) VALUES (?,?,?,?,?,?,?,?)",
-                     (o.id, now, o.label, o.rationale, o.risk, json.dumps(o.expected) if o.expected else None, json.dumps(o.tags), o.expires_at))
+    now = _story_now()
+    for opt in options:
+        conn.execute(
+            "INSERT OR REPLACE INTO story_options(id, created_at, label, rationale, risk, expected, tags, expires_at) VALUES (?,?,?,?,?,?,?,?)",
+            (
+                opt.id,
+                now,
+                opt.label,
+                opt.rationale,
+                opt.risk,
+                json.dumps(opt.expected) if opt.expected else None,
+                json.dumps(opt.tags),
+                opt.expires_at,
+            ),
+        )
     conn.commit()
+
 
 def refresh_story_options(conn: sqlite3.Connection, state: StoryState) -> list[StoryOption]:
     conn.execute("DELETE FROM story_options")
     opts = generate_story_options(state)
+    try:
+        cur = conn.execute("SELECT name FROM story_companions")
+        names = {str(row[0]).lower() for row in cur.fetchall()}
+        if any(name.startswith("mentor") for name in names):
+            for opt in opts:
+                if opt.risk > 0:
+                    opt.risk -= 1
+                if "mentor" not in opt.tags:
+                    opt.tags.append("mentor")
+    except Exception:
+        pass
     persist_options(conn, opts)
     return opts
 
+
 def apply_story_option(conn: sqlite3.Connection, state: StoryState, option_id: str) -> StoryEvent:
-    cur = conn.execute("SELECT id,label,rationale,risk,expected FROM story_options WHERE id=?", (option_id,))
+    cur = conn.execute(
+        "SELECT id,label,rationale,risk,expected FROM story_options WHERE id=?",
+        (option_id,),
+    )
     row = cur.fetchone()
     if not row:
-        raise ValueError("option_not_found")
-    _,label,_rationale,_risk,expected_json = row
-    expected: dict[str,int] = {}
+        raise LookupError("story.option_not_found")
+    _, label, _rationale, risk, expected_json = row
+    expected: dict[str, int] = {}
     if expected_json:
         try:
             raw = json.loads(expected_json)
             if isinstance(raw, dict):
-                for k,v in raw.items():
-                    if isinstance(v,(int,float)): expected[str(k)] = int(v)
-        except Exception: pass
-    for k,v in expected.items():
-        state.resources[k] = state.resources.get(k,0) + v
-    # energy decay floor
-    if state.resources.get("energie",0) < 0: state.resources["energie"] = 0
-    conn.execute("UPDATE story_state SET resources=?, ts=? WHERE id=1", (json.dumps(state.resources), _story_now()))
-    # record event
-    eid = f"ev_{int(_story_now()*1000)}"
-    txt = label
-    conn.execute("INSERT INTO story_events(ts, epoch, kind, text, mood, deltas, tags, option_ref) VALUES (?,?,?,?,?,?,?,?)",
-                 (_story_now(), state.epoch, "action", txt, state.mood, json.dumps(expected), json.dumps(["action"]), option_id))
+                for key, value in raw.items():
+                    if isinstance(value, (int, float)):
+                        expected[str(key)] = int(value)
+        except Exception:
+            expected = {}
+    base_risk = int(risk) if risk is not None else 0
+    if "erfahrung" not in expected:
+        expected["erfahrung"] = max(1, base_risk)
+    new_resources = dict(state.resources)
+    deltas: dict[str, int] = {}
+    for key, delta in expected.items():
+        before = new_resources.get(key, 0)
+        after = before + int(delta)
+        new_resources[key] = after
+        deltas[key] = int(delta)
+    if new_resources.get("energie", 0) < 0:
+        new_resources["energie"] = 0
+    epoch = int(getattr(state, "epoch", 0)) + 1
+    mood = state.mood
+    if deltas.get("energie", 0) > 0:
+        mood = "calm"
+    if deltas.get("inspiration", 0) > 0:
+        mood = "curious"
+    new_arc = eval_arc(new_resources, state.arc)
+    ts = _story_now()
+    conn.execute(
+        "UPDATE story_state SET ts=?, epoch=?, mood=?, arc=?, resources=? WHERE id=1",
+        (ts, epoch, mood, new_arc, json.dumps(new_resources)),
+    )
+    ev_id = f"sev_{int(ts * 1000)}"
+    conn.execute(
+        "INSERT INTO story_events(ts, epoch, kind, text, mood, deltas, tags, option_ref) VALUES (?,?,?,?,?,?,?,?)",
+        (
+            ts,
+            epoch,
+            "action",
+            label,
+            mood,
+            json.dumps(deltas),
+            json.dumps(["action"]),
+            option_id,
+        ),
+    )
+    maybe_arc_shift(conn, state.arc, new_arc, epoch, mood)
     conn.execute("DELETE FROM story_options WHERE id=?", (option_id,))
     conn.commit()
-    return StoryEvent(id=eid, ts=_story_now(), epoch=state.epoch, kind="action", text=txt, mood=state.mood, deltas=expected, tags=["action"], option_ref=option_id)
+    return StoryEvent(
+        id=ev_id,
+        ts=ts,
+        epoch=epoch,
+        kind="action",
+        text=label,
+        mood=mood,
+        deltas=deltas,
+        tags=["action"],
+        option_ref=option_id,
+    )
+
 
 def story_tick(conn: sqlite3.Connection) -> StoryEvent:
-    st = get_story_state(conn)
-    st.epoch += 1
-    st.resources["energie"] = max(0, st.resources.get("energie",0)-1)
-    new_arc = eval_arc(st.resources, st.arc)
-    arc_evt = maybe_arc_shift(conn, st.arc, new_arc, st.epoch, st.mood)
-    st.arc = new_arc
-    conn.execute("UPDATE story_state SET epoch=?, resources=?, ts=?, arc=? WHERE id=1", (st.epoch, json.dumps(st.resources), _story_now(), st.arc))
-    eid=f"tick_{int(_story_now()*1000)}"
-    conn.execute("INSERT INTO story_events(ts, epoch, kind, text, mood, deltas, tags, option_ref) VALUES (?,?,?,?,?,?,?,?)",
-                 (_story_now(), st.epoch, "tick", "Zeit vergeht", st.mood, json.dumps({}), json.dumps(["tick"]), None))
+    state = get_story_state(conn)
+    resources = dict(state.resources)
+    resources["energie"] = max(0, resources.get("energie", 0) - 1)
+    inspiration_before = state.resources.get("inspiration", 0)
+    if (
+        resources.get("inspiration", 0) < INSP_TICK_THRESHOLD
+        and resources.get("energie", 0) > INSP_MIN_ENERGY
+    ):
+        resources["inspiration"] = resources.get("inspiration", 0) + 1
+    if resources.get("inspiration", 0) > INSP_SOFT_CAP:
+        resources["inspiration"] = INSP_SOFT_CAP
+    epoch = state.epoch + 1
+    mood = state.mood
+    if resources.get("energie", 0) < 30:
+        mood = "strained"
+    new_arc = eval_arc(resources, state.arc)
+    ts = _story_now()
+    conn.execute(
+        "UPDATE story_state SET ts=?, epoch=?, mood=?, arc=?, resources=? WHERE id=1",
+        (ts, epoch, mood, new_arc, json.dumps(resources)),
+    )
+    text = "Zeit vergeht. Eine stille Verschiebung im inneren Raum."
+    deltas_tick: dict[str, int] = {"energie": -1}
+    inspiration_delta = resources.get("inspiration", 0) - inspiration_before
+    if inspiration_delta > 0:
+        deltas_tick["inspiration"] = inspiration_delta
+    ev_id = f"sev_{int(ts * 1000)}"
+    conn.execute(
+        "INSERT INTO story_events(ts, epoch, kind, text, mood, deltas, tags, option_ref) VALUES (?,?,?,?,?,?,?,?)",
+        (
+            ts,
+            epoch,
+            "tick",
+            text,
+            mood,
+            json.dumps(deltas_tick),
+            json.dumps(["tick"]),
+            None,
+        ),
+    )
+    maybe_arc_shift(conn, state.arc, new_arc, epoch, mood)
+    refresh_story_options(
+        conn,
+        StoryState(
+            epoch=epoch,
+            mood=mood,
+            arc=new_arc,
+            resources=resources,
+            options=[],
+        ),
+    )
     conn.commit()
-    if arc_evt: return arc_evt
-    return StoryEvent(id=eid, ts=_story_now(), epoch=st.epoch, kind="tick", text="Zeit vergeht", mood=st.mood, deltas={}, tags=["tick"], option_ref=None)
+    return StoryEvent(
+        id=ev_id,
+        ts=ts,
+        epoch=epoch,
+        kind="tick",
+        text=text,
+        mood=mood,
+        deltas=deltas_tick,
+        tags=["tick"],
+        option_ref=None,
+    )
+
 
 def fetch_events(conn: sqlite3.Connection, limit: int = 100) -> list[StoryEvent]:
-    cur = conn.execute("SELECT id, ts, epoch, kind, text, mood, deltas, tags, option_ref FROM story_events ORDER BY id DESC LIMIT ?", (limit,))
+    cur = conn.execute(
+        "SELECT id, ts, epoch, kind, text, mood, deltas, tags, option_ref FROM story_events ORDER BY id DESC LIMIT ?",
+        (limit,),
+    )
     out: list[StoryEvent] = []
     for row in cur.fetchall():
-        rid,ts,epoch,kind,text,mood,deltas_json,tags_json,option_ref = row
-        try: deltas = json.loads(deltas_json) if deltas_json else None
-        except Exception: deltas=None
-        try: tags = json.loads(tags_json) if tags_json else []
-        except Exception: tags=[]
-        out.append(StoryEvent(id=str(rid), ts=ts, epoch=epoch, kind=kind, text=text, mood=mood, deltas=deltas, tags=tags, option_ref=option_ref))
+        rid, ts, epoch, kind, text, mood, deltas_json, tags_json, option_ref = row
+        deltas: dict[str, int] | None
+        if deltas_json:
+            try:
+                raw = json.loads(deltas_json)
+                if isinstance(raw, dict):
+                    deltas = {
+                        str(k): int(v)
+                        for k, v in raw.items()
+                        if isinstance(v, (int, float))
+                    }
+                else:
+                    deltas = None
+            except Exception:
+                deltas = None
+        else:
+            deltas = None
+        tags: list[str] = []
+        if tags_json:
+            try:
+                raw_tags = json.loads(tags_json)
+                if isinstance(raw_tags, list):
+                    tags = [str(t) for t in raw_tags]
+            except Exception:
+                tags = []
+        out.append(
+            StoryEvent(
+                id=str(rid),
+                ts=ts,
+                epoch=epoch,
+                kind=kind,
+                text=text,
+                mood=mood,
+                deltas=deltas,
+                tags=tags,
+                option_ref=option_ref,
+            )
+        )
     return out
+
+
+__all__ = [
+    "StoryOption",
+    "StoryEvent",
+    "StoryState",
+    "Companion",
+    "CompanionCreate",
+    "Buff",
+    "BuffCreate",
+    "Skill",
+    "SkillCreate",
+    "eval_arc",
+    "maybe_arc_shift",
+    "get_story_state",
+    "list_story_options",
+    "generate_story_options",
+    "persist_options",
+    "refresh_story_options",
+    "apply_story_option",
+    "story_tick",
+    "fetch_events",
+]
