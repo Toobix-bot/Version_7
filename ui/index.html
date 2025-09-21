@@ -341,12 +341,29 @@
 		&copy; Life-Agent Dev • <a href="/docs" target="_blank">OpenAPI Docs</a> • <a href="/static-docs/openapi.yaml" target="_blank">Spec (YAML)</a>
 	</footer>
 	<script src="https://cdn.jsdelivr.net/npm/js-yaml@4.1.0/dist/js-yaml.min.js"></script>
+	<!-- Provide an inline favicon to avoid /favicon.ico 404s -->
+	<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%232563eb'/%3E%3Ctext x='50%25' y='50%25' dominant-baseline='middle' text-anchor='middle' font-family='Segoe UI,Arial' font-size='28' fill='white'%3ELA%3C/text%3E%3C/svg%3E" />
 	<script>
+		// Global error hooks to surface useful details instead of generic "Object"
+		window.addEventListener('error', (e)=>{
+			try { console.error('[window.onerror]', e.message, e.error || ''); } catch {}
+		});
+		window.addEventListener('unhandledrejection', (e)=>{
+			try {
+				const r = e.reason;
+				const msg = (r && (r.message || r.status || r.error)) ? (r.message || (r.status+': '+(r.error||''))) : String(r);
+				console.error('[unhandledrejection]', r);
+				const sum = document.getElementById('errorSummary');
+				if (sum) { sum.style.display='block'; sum.textContent = 'Fehler: '+msg; }
+			} catch {}
+		});
 		const $ = sel => document.querySelector(sel);
 		const api = (path, opts={}) => {
 			const key = $('#apiKey').value.trim();
 			const headers = Object.assign({'X-API-Key': key}, opts.headers||{});
-			return fetch(path, {...opts, headers}).then(r => r.json().catch(()=>({error:'non-json', status:r.status})));
+			return fetch(path, {...opts, headers})
+				.then(r => r.json().catch(()=>({error:'non-json', status:r.status})))
+				.catch(err => { console.error('API fail', path, err); throw err; });
 		};
 		// Tabs setup
 		const TABS = [
@@ -506,7 +523,7 @@
 			catch(e){ console.warn('story load fail', e); }
 		}
 		function fillStoryOptionButtons(){ ['A','B','C'].forEach((k,i)=>{ const btn=$('#btnStoryChoose'+k); const opt=_storyOptionsCache[i]; if(btn){ if(opt){ btn.textContent=opt.label||('Option '+k); btn.disabled=false; btn.dataset.optId=opt.id; } else { btn.textContent='-'; btn.disabled=true; btn.removeAttribute('data-opt-id'); } } }); }
-		async function storyChoose(ix){ const opt=_storyOptionsCache[ix]; if(!opt) return; try{ const r=await api('/story/choose',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({option_id:opt.id})}); setText('#idleOut', fmt(r)); storyLoad(); }catch(e){ console.warn('choose fail',e); } }
+	async function storyChoose(ix){ const opt=_storyOptionsCache[ix]; if(!opt) return; try{ const r=await api('/story/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({option_id:opt.id})}); setText('#idleOut', fmt(r)); storyLoad(); }catch(e){ console.warn('choose fail',e); } }
 		function wireStoryTutorial(){
 			$('#btnStoryLoad').onclick=()=>storyLoad();
 			$('#btnStoryRefresh').onclick=()=>storyLoad();
@@ -600,7 +617,7 @@
 			if(evtSrc){evtSrc.close();}
 			$('#eventsState').textContent='events: connecting';
 			const key=$('#apiKey').value.trim();
-			evtSrc = new EventSource('/events?token='+encodeURIComponent(key));
+			evtSrc = new EventSource('/events?key='+encodeURIComponent(key));
 			let lastHb=Date.now(); let hbTimer=null;
 			function armWatch(){ if(hbTimer) clearInterval(hbTimer); hbTimer=setInterval(()=>{ if(Date.now()-lastHb>25000){ $('#eventsState').textContent='events: stale'; $('#eventsState').style.background='#3a2f13'; $('#eventsState').style.color='#facc15'; } },5000); }
 			evtSrc.onopen=()=>{ $('#eventsState').textContent='events: open'; $('#eventsState').style.background='#1f3b2b'; $('#eventsState').style.color='#6ee7b7'; lastHb=Date.now(); armWatch(); };

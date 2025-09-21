@@ -17,12 +17,12 @@ REM 3. Install requirements if needed (heuristic: check groq package)
   call .venv\Scripts\pip install -r requirements.txt || goto :fail
 )
 
-REM 4. Default API token
-if "%API_TOKENS%"=="" set API_TOKENS=test
+REM 4. Respect .env/.secrets; only set a default token if none provided
+if "%API_TOKENS%"=="" set API_TOKENS=
 set LOG_LEVEL=INFO
 
 REM 5. Start server
-echo [START] http://127.0.0.1:8000  (Token: test)
+echo [START] http://127.0.0.1:8000  (Token: %API_TOKENS%)
 call .venv\Scripts\python -m uvicorn api.app:app --host 127.0.0.1 --port 8000
 
 goto :eof

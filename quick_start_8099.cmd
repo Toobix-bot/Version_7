@@ -10,10 +10,11 @@ call .venv\Scripts\python -m pip -q install --upgrade pip >nul 2>&1
   echo [INFO] Installing requirements...
   call .venv\Scripts\pip install -r requirements.txt || goto :fail
 )
-if "%API_TOKENS%"=="" set API_TOKENS=test
+REM Respect .env; only set if not defined (leave empty to defer to python-dotenv in app)
+if "%API_TOKENS%"=="" set API_TOKENS=
 set LOG_LEVEL=INFO
 set PORT=8099
-echo [START] http://127.0.0.1:%PORT%  (Token: test)
+echo [START] http://127.0.0.1:%PORT%  (Token: %API_TOKENS%)
 call .venv\Scripts\python -m uvicorn api.app:app --host 127.0.0.1 --port %PORT% --reload
 goto :eof
 :fail

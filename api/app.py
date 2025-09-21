@@ -78,6 +78,9 @@ if _test_token:
 if os.getenv("ALLOW_TEST_TOKENS", "1") == "1":  # safe in dev; disable in prod via env
     API_TOKENS.update({"test", "test-token"})
 
+# UI helper (dev only): optionally expose a key to the browser for local usage
+UI_AUTO_KEY_FROM_ENV = os.getenv("UI_AUTO_KEY_FROM_ENV", "0")
+
 # Early auth dependency (placed early so that later endpoint definitions referencing require_auth do not raise NameError).
 # The more elaborate security section further below re-defines the same function (idempotent logic) to keep original structure.
 from fastapi import Header  # already imported above, safe re-import for clarity
@@ -281,6 +284,24 @@ try:
         app.mount("/static-docs", StaticFiles(directory="docs"), name="static-docs")
 except Exception:
     pass
+
+# Dev-only helper: expose an app key to the UI when explicitly enabled and only for localhost
+from fastapi import HTTPException  # already imported above; harmless re-import
+@app.get("/dev/ui-key")
+async def dev_ui_key(request: Request) -> dict[str, str]:
+    """Return an app API key to the local UI when UI_AUTO_KEY_FROM_ENV=1.
+    Security: Only serves to localhost/::1 and only when explicitly enabled via env.
+    """
+    if os.getenv("UI_AUTO_KEY_FROM_ENV", "0") != "1":
+        raise HTTPException(status_code=404, detail="not enabled")
+    client_host = (request.client.host if request.client else None)
+    if client_host not in {"127.0.0.1", "::1", "localhost"}:
+        raise HTTPException(status_code=403, detail="forbidden")
+    # Choose a deterministic key: prefer PRIMARY_API_KEY, else first from API_TOKENS
+    key = PRIMARY_API_KEY or (next(iter(API_TOKENS)) if API_TOKENS else None)
+    if not key:
+        raise HTTPException(status_code=404, detail="no key")
+    return {"key": key}
 
 state: Dict[str, Any] = {"agents": {}, "meta": {"version": app.version, "start": APP_START}}
 # Event queue must be bound to the active loop; tests may recreate loops. Use a mapping per loop id.
@@ -1955,6 +1976,19 @@ async def get_meta(agent: str = Depends(require_auth)) -> dict[str, Any]:
 async def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
+# Inline favicon to avoid 404 spam in dev; browsers auto-request /favicon.ico
+FAVICON_SVG = (
+    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'>"
+    "<rect width='64' height='64' rx='12' fill='#2563eb'/>"
+    "<text x='50%' y='50%' dominant-baseline='middle' text-anchor='middle'"
+    " font-family='Segoe UI,Arial' font-size='28' fill='white'>LA</text>"
+    "</svg>"
+)
+
+@app.get("/favicon.ico")
+async def favicon() -> Response:
+    return Response(FAVICON_SVG.encode("utf-8"), media_type="image/svg+xml")
+
 
 @app.get("/events")
 async def events_stream(
@@ -2355,9 +2389,32 @@ section, section * { word-break: break-word; overflow-wrap: anywhere }
  </div>
 </div></div>
 <script>
-// Seed API Key once on first load (optional prompt); thereafter always read via getApiKey()
-(function(){ try{ const k = localStorage.getItem('api_key') || prompt('API Key?'); if(k) localStorage.setItem('api_key', k); }catch(_){} })();
-function getApiKey(){ try{ return localStorage.getItem('api_key') || ''; }catch(_){ return ''; } }
+// Seed API Key from URL once: if /story/ui?key=... is provided, store to localStorage and clean the URL
+(function(){
+    try {
+        const u = new URL(window.location.href);
+        const qp = u.searchParams.get('key');
+        if (qp) {
+            try { localStorage.setItem('api_key', qp); } catch(_){ }
+            u.searchParams.delete('key');
+            const newSearch = u.searchParams.toString();
+            const clean = u.pathname + (newSearch? ('?'+newSearch) : '') + u.hash;
+            history.replaceState(null, '', clean);
+        }
+    } catch(_){ }
+})();
+function getApiKey(){
+    try{
+        const fromLS = (localStorage.getItem('api_key')||'').trim();
+        if(fromLS) return fromLS;
+        try {
+            const u = new URL(window.location.href);
+            const qp = (u.searchParams.get('key')||'').trim();
+            if(qp) return qp;
+        } catch(_){ }
+        return '';
+    }catch(_){ return ''; }
+}
 let currentPane='dashboard';
 function setPane(which){ try{
     currentPane = which;
@@ -2386,6 +2443,12 @@ async function checkAuth(){
         setBadge('llmStatus','llm', false);
         setBadge('policyStatus','policy', false);
         showKeyBanner();
+        try {
+            // If enabled in dev, auto-fetch a key from backend to make local UX smoother
+            const res = await fetch('/dev/ui-key');
+            if(res.ok){ const j = await res.json(); if(j && j.key){ try{ localStorage.setItem('api_key', j.key); }catch(_){}; restartSSE(); return await checkAuth(); } }
+        } catch(_){ }
+        try { openKeyModal(); } catch(_) { }
     }
 }
 function fmtResBlocks(r){const maxMap={energie:100,wissen:200,inspiration:100,ruf:100,stabilitaet:100,erfahrung:1000,level:20};return '<div class="res-list">'+Object.entries(r).map(([k,v])=>{const max=maxMap[k]||100;const pct=Math.min(100,Math.round((v/max)*100));return `<div class='res' data-k='${k}'><div><b>${k}</b> <span style='float:right'>${v}</span></div><div class='bar'><span style='width:${pct}%'></span></div></div>`}).join('')+'</div>'}
@@ -2434,7 +2497,7 @@ async function saveKeyFromModal(){ try{
 const keyModalSave=document.getElementById('keyModalSave'); if(keyModalSave){ keyModalSave.onclick=saveKeyFromModal; }
 const keyModalCancel=document.getElementById('keyModalCancel'); if(keyModalCancel){ keyModalCancel.onclick=closeKeyModal; }
 const keyModalClose=document.getElementById('keyModalClose'); if(keyModalClose){ keyModalClose.onclick=closeKeyModal; }
-const navBtnDash=document.getElementById('navBtnDashboard'); if(navBtnDash){ navBtnDash.onclick=()=>setPane('dashboard'); }
+const navBtnDash=document.getElementById('navBtnDashboard'); if(navBtnDash){ navBtnDash.onclick=()=>{ setPane('dashboard'); try{ checkMetrics(); }catch(_){} }; }
 const navBtnStory=document.getElementById('navBtnStory'); if(navBtnStory){ navBtnStory.onclick=()=>setPane('story'); }
 const navBtnSug=document.getElementById('navBtnSuggestions'); if(navBtnSug){ navBtnSug.onclick=()=>{ setPane('suggestions'); loadSuggestionsList(); }}
 const navBtnPlanPR=document.getElementById('navBtnPlanPR'); if(navBtnPlanPR){ navBtnPlanPR.onclick=()=>setPane('planpr'); }
@@ -2732,7 +2795,19 @@ let idleTips=[]; function addIdleTip(t){ try{ idleTips.push(String(t)); if(idleT
 // Log Filter
 document.getElementById('logFilter').addEventListener('input',()=>{ const v = document.getElementById('logFilter').value.trim(); const items=[...document.querySelectorAll('#logBox .log-item')]; let rx=null; try{ rx = v? new RegExp(v,'i'):null;}catch(_){rx=null;} items.forEach(it=>{ const txt=it.textContent||''; it.style.display = !v? '' : (rx? (rx.test(txt)?'':'none') : (txt.toLowerCase().includes(v.toLowerCase())?'':'none')); }); });
 // Metrics & Suggestions
-async function checkMetrics(){ try{ const res = await fetch('/metrics'); const ok = res && res.ok; const nav=document.getElementById('navMetrics'); if(nav){ nav.textContent='/metrics: '+(ok?'ok':'fehler'); } const dm=document.getElementById('dashMetrics'); if(dm){ dm.textContent = ok? 'ok':'fehler'; } }catch(_){ const nav=document.getElementById('navMetrics'); if(nav){ nav.textContent='/metrics: fehler'; } const dm=document.getElementById('dashMetrics'); if(dm){ dm.textContent = 'fehler'; } } }
+async function checkMetrics(){
+    try{
+        const key = getApiKey();
+        const headers = key ? { 'X-API-Key': key } : {};
+        const res = await fetch('/metrics', { headers });
+        const ok = res && res.ok;
+        const nav=document.getElementById('navMetrics'); if(nav){ nav.textContent='/metrics: '+(ok?'ok':'fehler'); }
+        const dm=document.getElementById('dashMetrics'); if(dm){ dm.textContent = ok? 'ok':'fehler'; }
+    }catch(_){
+        const nav=document.getElementById('navMetrics'); if(nav){ nav.textContent='/metrics: fehler'; }
+        const dm=document.getElementById('dashMetrics'); if(dm){ dm.textContent = 'fehler'; }
+    }
+}
 async function loadOpenSuggestions(){ try{ const j=await fetchJSON('/suggest/list'); const cnt = (j && typeof j.total==='number')? j.total : (Array.isArray(j.items)? j.items.length: 0); const nav=document.getElementById('navSug'); if(nav){ nav.textContent = 'Vorschläge: '+cnt; } const dash=document.getElementById('dashSug'); if(dash){ dash.textContent = cnt>0? (cnt+' offen') : 'keine offen'; } }catch(_){ const nav=document.getElementById('navSug'); if(nav){ nav.textContent='Vorschläge: ?'; } }}
 </script>
 </body></html>"""
